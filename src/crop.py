@@ -1,0 +1,122 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import cv2
+import numpy as np
+
+from .utils import ensure_dir
+
+
+@dataclass
+class CropResult:
+    image: Any
+    bbox: tuple[int, int, int, int]
+    width: int
+    height: int
+    blank_ratio: float
+
+
+def extract_figure_crop(
+    page_image_path: Path,
+    bbox: tuple[int, int, int, int],
+    padding: int = 20,
+    refine: bool = True,
+    whitespace_threshold: int = 245,
+) -> CropResult:
+    page_image = cv2.imread(str(page_image_path), cv2.IMREAD_COLOR)
+    if page_image is None:
+        raise RuntimeError(f"Could not read rendered page image: {page_image_path}")
+
+    page_height, page_width = page_image.shape[:2]
+    padded_bbox = expand_bbox(bbox, padding, page_width, page_height)
+    x1, y1, x2, y2 = padded_bbox
+
+    if x2 <= x1 or y2 <= y1:
+        raise ValueError(f"Invalid detection bbox after padding: {bbox}")
+
+    final_bbox = padded_bbox
+
+    if refine:
+        crop = page_image[y1:y2, x1:x2]
+        refined_bbox = whitespace_trim_bbox(crop, whitespace_threshold)
+        if refined_bbox is not None:
+            rx1, ry1, rx2, ry2 = refined_bbox
+            final_bbox = expand_bbox(
+                (x1 + rx1, y1 + ry1, x1 + rx2, y1 + ry2),
+                padding,
+                page_width,
+                page_height,
+            )
+
+    fx1, fy1, fx2, fy2 = final_bbox
+    final_crop = page_image[fy1:fy2, fx1:fx2]
+    blank_ratio = compute_blank_ratio(final_crop, whitespace_threshold)
+
+    return CropResult(
+        image=final_crop,
+        bbox=final_bbox,
+        width=fx2 - fx1,
+        height=fy2 - fy1,
+        blank_ratio=blank_ratio,
+    )
+
+
+def save_crop(crop: CropResult, output_path: Path) -> None:
+    ensure_dir(output_path.parent)
+    ok = cv2.imwrite(str(output_path), crop.image)
+    if not ok:
+        raise RuntimeError(f"Could not save crop: {output_path}")
+
+
+def passes_quality(crop: CropResult, quality_config: dict[str, object], confidence: float = 1.0) -> bool:
+    if not quality_config.get("enabled", False):
+        return True
+
+    area = crop.width * crop.height
+    aspect_ratio = max(crop.width, crop.height) / max(min(crop.width, crop.height), 1)
+    return (
+        crop.width >= int(quality_config.get("min_width", 1))
+        and crop.height >= int(quality_config.get("min_height", 1))
+        and area >= int(quality_config.get("min_area", 1))
+        and crop.blank_ratio <= float(quality_config.get("max_blank_ratio", 1.0))
+        and aspect_ratio <= float(quality_config.get("max_aspect_ratio", 999))
+        and confidence >= float(quality_config.get("min_confidence", 0.0))
+    )
+
+
+def expand_bbox(
+    bbox: tuple[int, int, int, int],
+    padding: int,
+    image_width: int,
+    image_height: int,
+) -> tuple[int, int, int, int]:
+    x1, y1, x2, y2 = bbox
+    return (
+        max(0, x1 - padding),
+        max(0, y1 - padding),
+        min(image_width, x2 + padding),
+        min(image_height, y2 + padding),
+    )
+
+
+def whitespace_trim_bbox(image: Any, threshold: int) -> tuple[int, int, int, int] | None:
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    mask = (gray < threshold).astype(np.uint8) * 255
+    points = cv2.findNonZero(mask)
+
+    if points is None:
+        return None
+
+    x, y, width, height = cv2.boundingRect(points)
+    return x, y, x + width, y + height
+
+
+def compute_blank_ratio(image: Any, threshold: int) -> float:
+    if image.size == 0:
+        return 1.0
+
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    return float(np.mean(gray >= threshold))

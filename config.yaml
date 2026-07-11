@@ -1,0 +1,87 @@
+input_dir: input
+output_dir: output
+
+render:
+  dpi: 400
+  keep_rendered_pages: false
+
+model:
+  # If this file exists it is used. Otherwise, auto_download can fetch the
+  # official DocStructBench checkpoint from Hugging Face.
+  path: models/doclayout_yolo.pt
+  auto_download: true
+  repo_id: juliozhao/DocLayout-YOLO-DocStructBench
+  filename: doclayout_yolo_docstructbench_imgsz1024.pt
+
+detection:
+  image_size: 1024
+  confidence: 0.2
+  iou: 0.5
+  device: cpu
+  figure_labels:
+    - figure
+
+crop:
+  padding: 20
+  refine: true
+  whitespace_threshold: 245
+
+quality:
+  enabled: true
+  min_width: 64
+  min_height: 400
+  min_area: 4096
+  max_blank_ratio: 0.995
+  max_aspect_ratio: 4.0
+  min_confidence: 0.6
+
+ocr:
+  enabled: false
+  language: en
+  min_confidence: 0.5
+
+analysis:
+  enabled: false
+  # auto prefers digital PDF text when available, then LLM vision, then OCR fallback.
+  mode: auto
+  # Optional explicit pairing. If omitted, filenames containing qp/ms are paired automatically.
+  qp_pdf:
+  ms_pdf:
+  # Defaults to <per-question-pdf-output>/analysis/extracted_qna.json.
+  output_json:
+  dpi: 200
+  keep_pages: false
+  cleanup_with_llm: true
+  page_start:
+  page_end:
+  ms_page_start:
+  ms_page_end:
+  llm:
+    enabled: true
+    # OpenAI-compatible client. Environment fallbacks include KIMI_API_KEY/KIMI_MODEL/KIMI_BASE_URL.
+    api_key:
+    api_key_env:
+    base_url:
+    base_url_env:
+    model:
+    model_env:
+    dotenv_path: .env
+    cache_dir: .cache/question_analysis
+    temperature: 0.1
+    max_retries: 2
+  ocr:
+    enabled: false
+    language: en
+    min_confidence: 0.45
+
+html:
+  enabled: false
+  # Defaults to <output_dir>/html when enabled.
+  output_dir:
+  # Optional structured QNA JSON. If omitted, HTML is built from extraction metadata.
+  qna_json:
+  subject:
+  year:
+  paper_key:
+  group_by_parent: true
+  copy_images: true
