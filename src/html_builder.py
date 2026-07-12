@@ -120,8 +120,72 @@ def prepare_qnas(
 
 
 def group_qnas_by_parent(flat_qnas: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    grouped: dict[str, list[dict[str, Any]]] = {}
+    # Correct missing letter prefixes for roman numeral subparts (e.g. 5(i) -> 5(b)(i), 7(iii) -> 7(a)(iii))
+    parent_to_items: dict[str, list[dict[str, Any]]] = {}
     for qna in flat_qnas:
+        q_num = str(qna["question_number"])
+        match = re.match(r"^(\d+)", q_num)
+        parent_num = match.group(1) if match else q_num
+        parent_to_items.setdefault(parent_num, []).append(qna)
+
+    corrected_flat_qnas: list[dict[str, Any]] = []
+    for parent_num, items in parent_to_items.items():
+        latest_letter = None
+        for item in items:
+            q_num = str(item["question_number"])
+            letter_match = re.search(r"^\d+\(([a-zA-Z])\)", q_num)
+            if letter_match:
+                matched_letter = letter_match.group(1).lower()
+                if matched_letter not in ("i", "v", "x"):
+                    latest_letter = matched_letter
+            
+            roman_match = re.match(r"^(\d+)\(([ivxIVX]+)\)$", q_num)
+            if roman_match and latest_letter:
+                roman_part = roman_match.group(2)
+                item["question_number"] = f"{parent_num}({latest_letter})({roman_part})"
+            corrected_flat_qnas.append(item)
+
+    # 1.5 Inject virtual subpart intros for any letters that have nested children but no explicit intro item
+    parent_to_corrected: dict[str, list[dict[str, Any]]] = {}
+    for qna in corrected_flat_qnas:
+        q_num = str(qna["question_number"])
+        match = re.match(r"^(\d+)", q_num)
+        parent_num = match.group(1) if match else q_num
+        parent_to_corrected.setdefault(parent_num, []).append(qna)
+
+    final_flat_qnas: list[dict[str, Any]] = []
+    for parent_num, items in parent_to_corrected.items():
+        existing_numbers = {str(item["question_number"]) for item in items}
+        active_letters = set()
+        for item in items:
+            q_num = str(item["question_number"])
+            # check if it is a nested item like parent(letter)(child)
+            match = re.match(r"^\d+\(([a-zA-Z])\)\([^)]+\)", q_num)
+            if match:
+                active_letters.add(match.group(1).lower())
+
+        # For each active letter prefix, if there is no explicit intro item, insert a virtual placeholder intro
+        for letter in sorted(active_letters):
+            intro_num = f"{parent_num}({letter})"
+            if intro_num not in existing_numbers:
+                virtual_intro = {
+                    "question_number": intro_num,
+                    "text": "",
+                    "marks": None,
+                    "table_html": None,
+                    "is_mcq": False,
+                    "mcq_options": [],
+                    "associated_images": [],
+                    "answer_text": NO_ANSWER_TEXT,
+                    "answer_blocks": [],
+                }
+                items.append(virtual_intro)
+                existing_numbers.add(intro_num)
+
+        final_flat_qnas.extend(items)
+
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for qna in final_flat_qnas:
         q_num = str(qna["question_number"])
         match = re.match(r"^(\d+)", q_num)
         parent_num = match.group(1) if match else q_num
@@ -143,30 +207,76 @@ def group_qnas_by_parent(flat_qnas: list[dict[str, Any]]) -> list[dict[str, Any]
             sub_text = str(subpart.get("text") or "")
             sub_marks = subpart.get("marks")
 
-            if sub_q_num == parent_num:
-                table_html = subpart.get("table_html") or ""
-                if table_html:
-                    table_html = f'<div class="table-wrapper">{table_html}</div>'
-                mcq_html = ""
-                if subpart.get("is_mcq") and subpart.get("mcq_options"):
-                    has_mcq = True
-                    mcq_html = render_mcq_options(sub_q_num, subpart["mcq_options"])
-                parent_text_blocks.append(f'<div class="question-part-parent">{sub_text}{table_html}{mcq_html}</div>')
+            # Intro block detection logic:
+            is_parent_intro = (sub_q_num == parent_num)
+            is_sub_intro = False
+            for other in subparts:
+                other_num = str(other["question_number"])
+                if other_num != sub_q_num and other_num.startswith(sub_q_num):
+                    is_sub_intro = True
+                    break
+
+            # Find matching intro prefixes within the parent group (excluding the root parent number)
+            matching_intros = []
+            for other in subparts:
+                other_num = str(other["question_number"])
+                # check if other is a sub-intro and a prefix of sub_q_num (ignoring parent_num root)
+                if other_num != parent_num and other_num != sub_q_num and sub_q_num.startswith(other_num):
+                    # verify it is actually classified as an intro
+                    other_is_intro = False
+                    for check in subparts:
+                        check_num = str(check["question_number"])
+                        if check_num != other_num and check_num.startswith(other_num):
+                            other_is_intro = True
+                            break
+                    if other_is_intro:
+                        matching_intros.append(other_num)
+
+            is_nested = False
+            if matching_intros:
+                # Strip the longest matching subpart intro prefix to get the relative nested label
+                longest_intro = max(matching_intros, key=len)
+                label_display = sub_q_num[len(longest_intro):]
+                is_nested = True
             else:
+                # Fallback to stripping only the parent number
                 label_display = sub_q_num[len(parent_num):] if sub_q_num.startswith(parent_num) else sub_q_num
-                marks_html = f' <span class="part-marks">[{sub_marks} marks]</span>' if sub_marks else ""
-                table_html = subpart.get("table_html") or ""
-                if table_html:
-                    table_html = f'<div class="table-wrapper">{table_html}</div>'
 
-                mcq_html = ""
-                if subpart.get("is_mcq") and subpart.get("mcq_options"):
-                    has_mcq = True
-                    mcq_html = render_mcq_options(sub_q_num, subpart["mcq_options"])
+            table_html = ""
+            if subpart.get("table_html"):
+                table_html = f'<div class="table-wrapper">{subpart["table_html"]}</div>'
+                # If there's also an inline table in sub_text, remove it to keep only table_html
+                if "<table" in sub_text.lower():
+                    sub_text = re.sub(r"<table.*?>.*?</table>", "", sub_text, flags=re.DOTALL | re.IGNORECASE).strip()
 
+            mcq_html = ""
+            if subpart.get("is_mcq") and subpart.get("mcq_options"):
+                has_mcq = True
+                mcq_html = render_mcq_options(sub_q_num, subpart["mcq_options"])
+
+            nested_class = " nested" if is_nested else ""
+
+            if is_parent_intro:
+                parent_text_blocks.append(f'<div class="question-part-parent">{sub_text}{table_html}{mcq_html}</div>')
+            elif is_sub_intro:
+                # Sub-question intro (e.g. 1(b), 2(c)): Format with intro wrapper, no borders/checkboxes
                 parent_text_blocks.append(
                     f"""
-                    <div class="question-part">
+                    <div class="question-part-intro{nested_class}" id="part-{sanitize_name(sub_q_num)}">
+                      <div class="part-label-intro">{html.escape(label_display)}</div>
+                      <div class="part-body-intro">
+                        <p>{sub_text}</p>
+                        {table_html}
+                        {mcq_html}
+                      </div>
+                    </div>"""
+                )
+            else:
+                # Standard question part (leaf node)
+                marks_html = f' <span class="part-marks">[{sub_marks} marks]</span>' if sub_marks else ""
+                parent_text_blocks.append(
+                    f"""
+                    <div class="question-part{nested_class}" id="part-{sanitize_name(sub_q_num)}">
                       <div class="part-label">{html.escape(label_display)}</div>
                       <div class="part-body">
                         <p>{sub_text}{marks_html}</p>
@@ -187,9 +297,11 @@ def group_qnas_by_parent(flat_qnas: list[dict[str, Any]]) -> list[dict[str, Any]
                     seen_images.add(image_path)
                     all_associated_images.append(image_path)
 
-            answer_text = str(subpart.get("answer_text") or "")
-            if answer_text and answer_text != NO_ANSWER_TEXT:
-                all_answers.append((sub_q_num, answer_text))
+            # Only collect answers for non-intro parts
+            if not is_sub_intro:
+                answer_text = str(subpart.get("answer_text") or "")
+                if answer_text and answer_text != NO_ANSWER_TEXT:
+                    all_answers.append((sub_q_num, answer_text))
 
         answer_html = render_answer_sections(all_answers)
         parent_qnas.append(

@@ -563,11 +563,13 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 .part-label {
-  width: 32px;
+  min-width: 32px;
   height: 32px;
+  width: auto;
+  padding: 0 8px;
   background-color: var(--brand-indigo-light);
   color: var(--brand-indigo);
-  border-radius: 50%;
+  border-radius: 16px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -611,6 +613,66 @@ h1, h2, h3, h4, h5, h6 {
   font-size: 0.95rem;
   margin-left: 0.5rem;
   font-family: var(--font-family-title);
+}
+
+/* Intro blocks styling (for sub-question intros like 1(b) or 2(c)) */
+.question-part-intro {
+  display: flex;
+  background-color: transparent;
+  border: none;
+  padding: 0.5rem 1.75rem;
+  margin-top: 1.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.part-label-intro {
+  min-width: 32px;
+  height: 32px;
+  width: auto;
+  padding: 0 8px;
+  background-color: var(--brand-indigo-light);
+  color: var(--brand-indigo);
+  border-radius: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 800;
+  font-size: 0.92rem;
+  font-family: var(--font-family-title);
+  flex-shrink: 0;
+  border: 1px solid var(--border-focus);
+  margin-right: 1.25rem;
+  box-shadow: 0 2px 4px rgba(220, 130, 10, 0.04);
+}
+
+.part-body-intro {
+  flex: 1;
+  font-size: 1.08rem;
+  line-height: 1.7;
+  color: var(--text-dark);
+  font-weight: 600;
+}
+
+.part-body-intro p {
+  margin-bottom: 1rem;
+}
+
+/* Hierarchical indentation for sub-question nested elements */
+.question-part.nested {
+  margin-left: 2.5rem;
+}
+
+.question-part-intro.nested {
+  margin-left: 2.5rem;
+}
+
+@media (max-width: 768px) {
+  .question-part.nested {
+    margin-left: 1.25rem;
+  }
+  .question-part-intro.nested {
+    margin-left: 1.25rem;
+  }
 }
 
 .figure-wrapper {
