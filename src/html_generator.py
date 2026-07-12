@@ -34,9 +34,9 @@ class HTMLGenerator:
   --font-family-body: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   
   /* Premium Warm Amber & Cream Color Scheme */
-  --brand-indigo: hsl(38, 90%, 43%);
-  --brand-indigo-hover: hsl(38, 90%, 35%);
-  --brand-indigo-light: hsl(38, 70%, 96%);
+  --brand-warm: hsl(38, 90%, 43%);
+  --brand-warm-hover: hsl(38, 90%, 35%);
+  --brand-warm-light: hsl(38, 70%, 96%);
   --accent-amber: hsl(38, 100%, 50%);
   --accent-color: var(--accent-amber);
   
@@ -117,7 +117,7 @@ h1, h2, h3, h4, h5, h6 {
   border-radius: var(--radius-lg);
   margin-bottom: 2.5rem;
   box-shadow: var(--shadow-lg);
-  border-bottom: 5px solid var(--brand-indigo);
+  border-bottom: 5px solid var(--brand-warm);
   position: relative;
   overflow: hidden;
 }
@@ -170,7 +170,7 @@ h1, h2, h3, h4, h5, h6 {
 .stat-card:hover {
   transform: translateY(-4px);
   box-shadow: var(--shadow-hover);
-  border-color: var(--brand-indigo);
+  border-color: var(--brand-warm);
 }
 
 .stat-card h3 {
@@ -220,7 +220,7 @@ h1, h2, h3, h4, h5, h6 {
 
 .search-input:focus {
   outline: none;
-  border-color: var(--brand-indigo);
+  border-color: var(--brand-warm);
   box-shadow: 0 0 0 4px var(--border-focus);
 }
 
@@ -244,7 +244,7 @@ h1, h2, h3, h4, h5, h6 {
 .question-card:hover {
   transform: translateY(-4px);
   box-shadow: var(--shadow-hover);
-  border-color: var(--brand-indigo);
+  border-color: var(--brand-warm);
 }
 
 .card-meta {
@@ -294,7 +294,7 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 .question-card h2 a:hover {
-  color: var(--brand-indigo);
+  color: var(--brand-warm);
 }
 
 .question-card p {
@@ -307,7 +307,7 @@ h1, h2, h3, h4, h5, h6 {
 
 .btn-link {
   display: inline-block;
-  background-color: var(--brand-indigo);
+  background-color: var(--brand-warm);
   color: white;
   padding: 0.55rem 1.35rem;
   border-radius: var(--radius-sm);
@@ -322,7 +322,7 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 .btn-link:hover {
-  background-color: var(--brand-indigo-hover);
+  background-color: var(--brand-warm-hover);
   transform: translateY(-1px);
   box-shadow: 0 4px 12px rgba(243, 75, 59, 0.2);
 }
@@ -376,9 +376,9 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 .app-header-meta a:hover {
-  background-color: var(--brand-indigo);
+  background-color: var(--brand-warm);
   color: white;
-  border-color: var(--brand-indigo);
+  border-color: var(--brand-warm);
 }
 
 .layout-grid {
@@ -417,7 +417,7 @@ h1, h2, h3, h4, h5, h6 {
 
 .sidebar-search:focus {
   outline: none;
-  border-color: var(--brand-indigo);
+  border-color: var(--brand-warm);
 }
 
 .sidebar-list {
@@ -446,12 +446,12 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 .sidebar-item:hover {
-  background-color: var(--brand-indigo-light);
-  color: var(--brand-indigo);
+  background-color: var(--brand-warm-light);
+  color: var(--brand-warm);
 }
 
 .sidebar-item.active {
-  background-color: var(--brand-indigo);
+  background-color: var(--brand-warm);
   color: white;
   font-weight: 600;
 }
@@ -515,7 +515,7 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 .toggle-answer-btn {
-  background-color: var(--brand-indigo);
+  background-color: var(--brand-warm);
   color: white;
   border: none;
   padding: 0.4rem 1rem;
@@ -529,7 +529,7 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 .toggle-answer-btn:hover {
-  background-color: var(--brand-indigo-hover);
+  background-color: var(--brand-warm-hover);
 }
 
 /* Real Question Paper Styling */
@@ -539,9 +539,9 @@ h1, h2, h3, h4, h5, h6 {
   color: var(--text-dark);
   line-height: 1.75;
   margin-bottom: 2rem;
-  border-left: 4.5px solid var(--brand-indigo);
+  border-left: 4.5px solid var(--brand-warm);
   padding: 1.25rem 1.5rem;
-  background: linear-gradient(to right, var(--brand-indigo-light), transparent);
+  background: linear-gradient(to right, var(--brand-warm-light), transparent);
   border-radius: 4px;
   box-shadow: inset 1px 0 0 rgba(0,0,0,0.03);
 }
@@ -567,8 +567,8 @@ h1, h2, h3, h4, h5, h6 {
   height: 32px;
   width: auto;
   padding: 0 8px;
-  background-color: var(--brand-indigo-light);
-  color: var(--brand-indigo);
+  background-color: var(--brand-warm-light);
+  color: var(--brand-warm);
   border-radius: 16px;
   display: inline-flex;
   align-items: center;
@@ -591,27 +591,35 @@ h1, h2, h3, h4, h5, h6 {
 
 .part-marks {
   display: inline-block;
-  background-color: var(--brand-indigo-light);
-  color: var(--brand-indigo);
+  background-color: var(--brand-warm-light);
+  color: var(--brand-warm);
   font-weight: 700;
-  font-size: 0.76rem;
-  padding: 0.2rem 0.6rem;
+  font-size: 0.85rem;
+  padding: 0.2rem 0.7rem;
   border-radius: 20px;
   border: 1px solid var(--border-focus);
   margin-left: 0.5rem;
   vertical-align: middle;
   letter-spacing: 0.2px;
+  font-family: var(--font-family-title);
 }
 
 .part-body p {
   margin-bottom: 1rem;
 }
 
-.part-marks {
+/* Marks inside answer section - slightly larger, warmer accent */
+.part-marks-answer {
+  display: inline-block;
+  background-color: var(--brand-warm-light);
+  color: var(--accent-amber);
   font-weight: 700;
-  color: var(--danger-color);
   font-size: 0.95rem;
+  padding: 0.2rem 0.7rem;
+  border-radius: 20px;
+  border: 1px solid var(--border-focus);
   margin-left: 0.5rem;
+  vertical-align: middle;
   font-family: var(--font-family-title);
 }
 
@@ -630,8 +638,8 @@ h1, h2, h3, h4, h5, h6 {
   height: 32px;
   width: auto;
   padding: 0 8px;
-  background-color: var(--brand-indigo-light);
-  color: var(--brand-indigo);
+  background-color: var(--brand-warm-light);
+  color: var(--brand-warm);
   border-radius: 16px;
   display: inline-flex;
   align-items: center;
@@ -687,7 +695,7 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 .figure-wrapper:hover {
-  border-color: var(--brand-indigo);
+  border-color: var(--brand-warm);
 }
 
 .figure-wrapper img {
@@ -709,8 +717,8 @@ h1, h2, h3, h4, h5, h6 {
   font-size: 0.78rem;
   opacity: 0.8;
   font-family: monospace;
-  background-color: var(--brand-indigo-light);
-  color: var(--brand-indigo);
+  background-color: var(--brand-warm-light);
+  color: var(--brand-warm);
   padding: 0.15rem 0.35rem;
   border-radius: 4px;
   margin-left: 0.25rem;
@@ -740,7 +748,7 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 .table-wrapper th {
-  background-color: var(--brand-indigo-light);
+  background-color: var(--brand-warm-light);
   color: var(--text-dark);
   font-weight: 700;
   font-family: var(--font-family-title);
@@ -776,7 +784,7 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 .mcq-option-item:hover {
-  background-color: var(--brand-indigo-light);
+  background-color: var(--brand-warm-light);
   border-color: var(--border-focus);
   transform: translateX(3px);
 }
@@ -786,7 +794,7 @@ h1, h2, h3, h4, h5, h6 {
   cursor: pointer;
   width: 1.25rem;
   height: 1.25rem;
-  accent-color: var(--brand-indigo);
+  accent-color: var(--brand-warm);
 }
 
 .mcq-option-label {
@@ -802,14 +810,14 @@ h1, h2, h3, h4, h5, h6 {
 
 .option-letter {
   font-weight: 800;
-  color: var(--brand-indigo);
+  color: var(--brand-warm);
 }
 
 /* Mark Scheme styling */
 .answer-section {
   background: #fffdfb;
   border: 1px solid var(--border-light);
-  border-left: 4.5px solid var(--brand-indigo);
+  border-left: 4.5px solid var(--brand-warm);
   border-radius: var(--radius-md);
   padding: 1.5rem;
   margin-bottom: 1.5rem;
@@ -818,14 +826,14 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 .answer-section:hover {
-  border-color: var(--brand-indigo);
+  border-color: var(--brand-warm);
   box-shadow: 0 4px 12px rgba(220, 130, 10, 0.06);
 }
 
 .answer-part-header {
   font-size: 0.88rem;
   font-weight: 800;
-  color: var(--brand-indigo);
+  color: var(--brand-warm);
   text-transform: uppercase;
   letter-spacing: 0.8px;
   border-bottom: 1.5px solid var(--border-light);
@@ -839,7 +847,7 @@ h1, h2, h3, h4, h5, h6 {
 
 .answer-part-header::before {
   content: "MS";
-  background-color: var(--brand-indigo-light);
+  background-color: var(--brand-warm-light);
   padding: 0.15rem 0.4rem;
   border-radius: 4px;
   font-size: 0.72rem;
@@ -1197,7 +1205,7 @@ h1, h2, h3, h4, h5, h6 {
     .dashboard-stat-card:hover {{
       transform: translateY(-2px);
       box-shadow: var(--shadow-md);
-      border-color: var(--brand-indigo);
+      border-color: var(--brand-warm);
     }}
   </style>
 </head>
@@ -1218,7 +1226,7 @@ h1, h2, h3, h4, h5, h6 {
       </div>
       <div class="dashboard-stat-card">
         <p class="eyebrow" style="color: var(--text-muted); font-size: 0.75rem; font-weight: 700; margin-bottom: 0.5rem;">Multiple Choice</p>
-        <h2 style="font-size: 2.2rem; color: var(--brand-indigo); font-weight: 800;">{mcq_count}</h2>
+        <h2 style="font-size: 2.2rem; color: var(--brand-warm); font-weight: 800;">{mcq_count}</h2>
       </div>
       <div class="dashboard-stat-card">
         <p class="eyebrow" style="color: var(--text-muted); font-size: 0.75rem; font-weight: 700; margin-bottom: 0.5rem;">Diagram Exercises</p>

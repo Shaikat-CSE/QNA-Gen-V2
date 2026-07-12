@@ -91,12 +91,20 @@ Or use any OpenAI-compatible provider. See `config.yaml` → `analysis.llm.*`.
 
 ## 🎯 Run
 
-### Full Pipeline — Extract + Analyze + HTML
+### Full Pipeline — Extract + Analyze + HTML (Recommended)
 
 ```powershell
-python -m src.pipeline --config config.yaml --analyze --html `
-  --subject "IGCSE Biology" --year 2019 --paper-key "4BI1-1"
+# Only 2021 files in input/ (move other years out)
+python -m src.pipeline --config config.yaml --analyze --analysis-mode llm `
+  --html --html-group-by-parent `
+  --subject "IGCSE Biology" --year 2021 --paper-key "4BI1 1.0"
 ```
+
+**Flags explained:**
+| Flag | Why |
+|---|---|
+| `--analysis-mode llm` | Forces LLM vision on every page. Avoids `auto` mode which mixes heuristic text (produces junk page-number questions). |
+| `--html-group-by-parent` | Groups sub-parts (`1(a)`, `1(b)`) under parent question (`1`). Produces 1 HTML per real question, not 1 per sub-part. |
 
 ### Extract Only (Diagrams + Metadata)
 
