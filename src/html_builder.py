@@ -322,14 +322,18 @@ def render_mcq_options(question_number: str, options: list[Any]) -> str:
     mcq_id = f"mcq-{sanitize_name(question_number)}"
     items: list[str] = []
     for option in options:
-        option_text = str(option).strip()
-        match = re.match(r"^(?P<label>[A-H])[\s.)-]+(?P<body>.+)$", option_text)
-        if match:
-            label = match.group("label")
-            body = match.group("body")
+        if isinstance(option, dict):
+            label = str(option.get("option") or option.get("label") or "").strip()
+            body = str(option.get("text") or option.get("body") or "").strip()
         else:
-            label = option_text[:1].upper() if option_text else ""
-            body = option_text[1:].strip() if len(option_text) > 1 else option_text
+            option_text = str(option).strip()
+            match = re.match(r"^(?P<label>[A-H])[\s.)-]+(?P<body>.+)$", option_text)
+            if match:
+                label = match.group("label")
+                body = match.group("body")
+            else:
+                label = option_text[:1].upper() if option_text else ""
+                body = option_text[1:].strip() if len(option_text) > 1 else option_text
 
         item_id = sanitize_name(f"option-{mcq_id}-{label}")
         items.append(
@@ -367,6 +371,12 @@ def render_answer_sections(answers: list[tuple[str, str]]) -> str:
     return "\n".join(sections)
 
 
+def remove_figure_captions(html_content: str) -> str:
+    # Matches and removes `<div class="figure-caption">...</div>`
+    pattern = r'<div class="figure-caption">.*?</div>'
+    return re.sub(pattern, '', html_content, flags=re.DOTALL | re.IGNORECASE)
+
+
 def stage_associated_images(
     qna: dict[str, Any],
     output_dir: Path,
@@ -400,6 +410,7 @@ def stage_associated_images(
 
         staged_sources.append(relative_src)
 
+    text_html = remove_figure_captions(text_html)
     qna["text_html"] = text_html
     qna["associated_images"] = staged_sources
 
@@ -622,11 +633,9 @@ def html_references_image(text_html: str, relative_src: str, original_value: str
 
 def figure_html(relative_src: str, caption: str) -> str:
     safe_src = html.escape(relative_src, quote=True)
-    safe_caption = html.escape(caption or Path(relative_src).name)
     return f"""
     <div class="figure-wrapper">
       <img src="{safe_src}" alt="Diagram">
-      <div class="figure-caption">Figure: {safe_caption}</div>
     </div>"""
 
 

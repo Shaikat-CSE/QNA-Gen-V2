@@ -705,6 +705,18 @@ h1, h2, h3, h4, h5, h6 {
   font-weight: 500;
 }
 
+.fig-filename {
+  font-size: 0.78rem;
+  opacity: 0.8;
+  font-family: monospace;
+  background-color: var(--brand-indigo-light);
+  color: var(--brand-indigo);
+  padding: 0.15rem 0.35rem;
+  border-radius: 4px;
+  margin-left: 0.25rem;
+  display: inline-block;
+}
+
 /* Premium styled Data Tables */
 .table-wrapper {
   overflow-x: auto;
