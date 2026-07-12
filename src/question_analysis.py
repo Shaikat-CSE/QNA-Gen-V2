@@ -24,15 +24,6 @@ class ExamPair:
     mark_scheme_pdf: Path | None
 
 
-@dataclass(frozen=True)
-class PageText:
-    page: int
-    text: str
-    blocks: list[dict[str, Any]]
-    width: float
-    height: float
-
-
 def run_question_analysis(
     pdfs: list[Path],
     input_root: Path,
@@ -163,7 +154,6 @@ def analyze_question_pdf(
     ocr_engine: "PageOCREngine | None",
     config: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    page_texts = extract_pdf_text_pages(pdf_path)
     pages_dir = ensure_dir(output_dir / "qp_pages")
     questions: list[dict[str, Any]] = []
     active_question = "1"
@@ -175,8 +165,7 @@ def analyze_question_pdf(
         page_start=config.get("page_start"),
         page_end=config.get("page_end"),
     ):
-        page_text = page_texts.get(rendered_page.page_number)
-        backend = choose_backend(mode, page_text, llm_client, ocr_engine)
+        backend = choose_backend(mode, llm_client, ocr_engine)
         page_diagrams = diagrams_by_page.get(rendered_page.page_number, [])
 
         try:
@@ -196,12 +185,7 @@ def analyze_question_pdf(
                     source="ocr",
                 )
             else:
-                page_questions = heuristic_questions_from_blocks(
-                    page_text.blocks if page_text else [],
-                    rendered_page.page_number,
-                    page_diagrams,
-                    source="digital",
-                )
+                page_questions = []
 
             normalized = [
                 normalize_question_block(question, rendered_page.page_number, page_diagrams)
@@ -240,7 +224,6 @@ def analyze_mark_scheme_pdf(
     ocr_engine: "PageOCREngine | None",
     config: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    page_texts = extract_pdf_text_pages(pdf_path)
     pages_dir = ensure_dir(output_dir / "ms_pages")
     answers: list[dict[str, Any]] = []
 
@@ -251,8 +234,7 @@ def analyze_mark_scheme_pdf(
         page_start=config.get("ms_page_start"),
         page_end=config.get("ms_page_end"),
     ):
-        page_text = page_texts.get(rendered_page.page_number)
-        backend = choose_backend(mode, page_text, llm_client, ocr_engine)
+        backend = choose_backend(mode, llm_client, ocr_engine)
 
         try:
             if backend == "llm" and llm_client is not None:
@@ -261,7 +243,7 @@ def analyze_mark_scheme_pdf(
                 ocr_lines = ocr_engine.extract_lines(rendered_page.image_path)
                 page_answers = heuristic_answers_from_lines(ocr_lines, rendered_page.page_number, source="ocr")
             else:
-                page_answers = heuristic_answers_from_text(page_text.text if page_text else "", rendered_page.page_number)
+                page_answers = []
 
             normalized = [normalize_answer_block(answer, rendered_page.page_number) for answer in page_answers]
             answers.extend(normalized)
@@ -573,9 +555,6 @@ def cleanup_qnas_with_llm(qnas: list[dict[str, Any]], llm_client: OpenAICompatib
 
 def make_llm_client(config: dict[str, Any], base_dir: Path) -> OpenAICompatibleVisionClient | None:
     llm_config = config.get("llm") or {}
-    mode = str(config.get("mode", "auto")).lower()
-    if mode == "digital":
-        return None
     if not bool(llm_config.get("enabled", True)):
         return None
 
@@ -585,13 +564,14 @@ def make_llm_client(config: dict[str, Any], base_dir: Path) -> OpenAICompatibleV
     model = optional_config_or_env(llm_config, "model", "model_env", ["ANALYSIS_LLM_MODEL", "KIMI_MODEL", "OPENAI_MODEL"])
     base_url = optional_config_or_env(llm_config, "base_url", "base_url_env", ["ANALYSIS_LLM_BASE_URL", "KIMI_BASE_URL", "OPENAI_BASE_URL"])
 
+    mode = str(config.get("mode", "auto")).lower()
     if not api_key or not model:
         if mode == "llm":
             raise RuntimeError(
                 "analysis.mode=llm requires an API key and model. Set analysis.llm.* or env vars "
                 "ANALYSIS_LLM_API_KEY/ANALYSIS_LLM_MODEL, KIMI_API_KEY/KIMI_MODEL, or OPENAI_API_KEY/OPENAI_MODEL."
             )
-        LOGGER.info("No LLM analysis credentials found; falling back to digital/OCR analysis when possible")
+        LOGGER.info("No LLM analysis credentials found; falling back to OCR analysis when possible")
         return None
 
     cache_dir_value = llm_config.get("cache_dir") or ".cache/question_analysis"
@@ -621,19 +601,16 @@ def make_page_ocr(config: dict[str, Any]) -> PageOCREngine | None:
 
 def choose_backend(
     mode: str,
-    page_text: PageText | None,
     llm_client: OpenAICompatibleVisionClient | None,
     ocr_engine: PageOCREngine | None,
 ) -> str:
-    if mode in {"llm", "ocr", "digital"}:
+    if mode in {"llm", "ocr"}:
         return mode
-    if page_text and len(page_text.text.strip()) >= 80:
-        return "digital"
     if llm_client is not None:
         return "llm"
     if ocr_engine is not None:
         return "ocr"
-    return "digital"
+    return "llm"
 
 
 def find_exam_pairs(pdfs: list[Path], config: dict[str, Any], base_dir: Path) -> list[ExamPair]:
@@ -675,50 +652,6 @@ def exam_pair_key(path: Path) -> str:
     name = re.sub(r"[^a-z0-9]+", "", name)
     return name
 
-
-def extract_pdf_text_pages(pdf_path: Path) -> dict[int, PageText]:
-    try:
-        import fitz
-    except ImportError as exc:
-        raise RuntimeError("PyMuPDF is required for question analysis") from exc
-
-    pages: dict[int, PageText] = {}
-    document = fitz.open(pdf_path)
-    try:
-        for index, page in enumerate(document, start=1):
-            blocks = []
-            for block in page.get_text("blocks"):
-                if len(block) < 5:
-                    continue
-                x0, y0, x1, y1, text, *_ = block
-                clean = normalize_whitespace(str(text))
-                if clean:
-                    blocks.append(
-                        {
-                            "text": clean,
-                            "bbox": [float(x0), float(y0), float(x1), float(y1)],
-                            "box_1000": point_bbox_to_box_1000([x0, y0, x1, y1], page.rect.width, page.rect.height),
-                        }
-                    )
-            pages[index] = PageText(
-                page=index,
-                text=page.get_text("text"),
-                blocks=blocks,
-                width=float(page.rect.width),
-                height=float(page.rect.height),
-            )
-    finally:
-        document.close()
-    return pages
-
-
-def heuristic_questions_from_blocks(
-    blocks: list[dict[str, Any]],
-    page_number: int,
-    diagrams: list[dict[str, Any]],
-    source: str,
-) -> list[dict[str, Any]]:
-    return heuristic_questions_from_text_units(blocks, page_number, diagrams, source)
 
 
 def heuristic_questions_from_lines(
@@ -770,7 +703,7 @@ def heuristic_answers_from_lines(lines: list[dict[str, Any]], page_number: int, 
     return heuristic_answers_from_text(text, page_number, source=source)
 
 
-def heuristic_answers_from_text(text: str, page_number: int, source: str = "digital") -> list[dict[str, Any]]:
+def heuristic_answers_from_text(text: str, page_number: int, source: str = "ocr") -> list[dict[str, Any]]:
     if "Question" not in text and "Answer" not in text:
         return []
 
@@ -978,16 +911,7 @@ def merge_answer_html(answer_blocks: list[dict[str, Any]], question_number: str)
         if not body or key in seen:
             continue
         seen.add(key)
-        label = html.escape(str(answer.get("question_number") or question_number))
-        sections.append(
-            f"""
-            <div class="answer-section">
-              <h4 class="answer-part-header">Part {label}</h4>
-              <div class="answer-part-body">
-                {body}
-              </div>
-            </div>"""
-        )
+        sections.append(body)
     return "\n".join(sections) if sections else "<p class='ms-para'>No official mark scheme answer found for this question block.</p>"
 
 
@@ -1117,12 +1041,12 @@ def sort_blocks(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 QUESTION_START_RE = re.compile(
-    r"^\s*(?P<number>\d+\s*(?:\([a-z]\))?(?:\([ivxlcdm]+\))?)\s*(?=[A-Z(]|$)",
+    r"^\s*(?P<number>\d+(?:\s*\([a-z]\))*(?:\s*\([ivxlcdm]+\))?)\s*(?![a-z])",
     flags=re.I,
 )
 
 ANSWER_LABEL_RE = re.compile(
-    r"(?<![A-Za-z0-9])(?P<number>\d+\s*(?:\([a-z]\)\s*)+(?:\([ivxlcdm]+\)\s*)?)(?![A-Za-z0-9])",
+    r"(?<![A-Za-z0-9])(?P<number>\d+(?:\s*\([a-z]\))*(?:\s*\([ivxlcdm]+\))?)(?![A-Za-z0-9(])",
     flags=re.I,
 )
 
@@ -1155,20 +1079,26 @@ def normalize_whitespace(value: str) -> str:
 
 
 def is_page_artifact(text: str) -> bool:
-    low = text.lower()
-    if len(text) < 2:
+    low = text.lower().strip()
+    if len(low) < 2:
         return True
-    patterns = [
+    exact_artifacts = {
         "turn over",
         "blank page",
         "answer all questions",
+        "do not write outside the box",
+        "centre number",
+        "candidate number",
+        "candidate name",
+    }
+    if low in exact_artifacts:
+        return True
+    header_prefixes = [
         "total for question",
         "international gcse",
         "pearson edexcel",
-        "candidate",
-        "centre number",
     ]
-    return any(pattern in low for pattern in patterns)
+    return any(low.startswith(prefix) for prefix in header_prefixes)
 
 
 def extract_marks(text: str) -> int | None:

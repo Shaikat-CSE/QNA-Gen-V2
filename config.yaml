@@ -42,7 +42,7 @@ ocr:
 
 analysis:
   enabled: false
-  # auto prefers digital PDF text when available, then LLM vision, then OCR fallback.
+  # auto prefers LLM vision, then OCR fallback.
   mode: auto
   # Optional explicit pairing. If omitted, filenames containing qp/ms are paired automatically.
   qp_pdf:

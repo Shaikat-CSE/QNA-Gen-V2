@@ -420,7 +420,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--quality", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--ocr", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--analyze", action=argparse.BooleanOptionalAction, default=None, help="Extract question/answer structure")
-    parser.add_argument("--analysis-mode", choices=["auto", "llm", "ocr", "digital"], help="Question analysis backend")
+    parser.add_argument("--analysis-mode", choices=["auto", "llm", "ocr"], help="Question analysis backend")
     parser.add_argument("--qp-pdf", help="Question paper PDF for analysis")
     parser.add_argument("--ms-pdf", help="Mark scheme PDF for analysis")
     parser.add_argument("--analysis-output", help="Path for extracted_qna.json")

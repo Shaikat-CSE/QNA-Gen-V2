@@ -1,56 +1,58 @@
-# 📄 Exam Diagram Extraction & Q&A Workbook Generator
+# Exam Diagram Extraction & Q&A Workbook Generator
 
-> **From scanned exam PDFs to interactive HTML workbooks — automatically.**  
-> Renders pages → detects figures → extracts questions via LLM vision → matches mark scheme answers → generates a premium 3-column study workbook.
+> **From scanned exam PDFs to interactive HTML workbooks — automatically.**
+> Renders pages -> detects figures -> extracts questions via LLM vision -> matches mark scheme answers -> generates a premium 3-column study workbook.
 
 ---
 
-## 🧠 Pipeline Overview
+## Pipeline Overview
 
 ```text
 PDFs (QP + MS)
-    │
-    ▼
-┌──────────────────────────────────────────────────────────────┐
-│  1. Render — PyMuPDF @ 400 DPI                              │
-│     → Page images (PNG)                                      │
-├──────────────────────────────────────────────────────────────┤
-│  2. Detect — DocLayout-YOLO figure detection                 │
-│     → Bounding boxes for figures only                        │
-│     → Quality filter: min_height, aspect_ratio, confidence   │
-├──────────────────────────────────────────────────────────────┤
-│  3. Crop — OpenCV + whitespace trim + padding               │
-│     → Clean diagram crops (PNG)                              │
-├──────────────────────────────────────────────────────────────┤
-│  4. Analyze — LLM Vision (Kimi/GPT-4o)                      │
-│     → Extract questions from scanned QP page images          │
-│     → Extract answers from MS digital text                   │
-│     → Match Q↔A via smart number normalization               │
-├──────────────────────────────────────────────────────────────┤
-│  5. Generate — Static HTML workbook                          │
-│     → 3-column layout: sidebar nav | question | answer       │
-│     → Dashboard with search, stats, MCQ radios               │
-│     → MathJax, diagrams inline, mark scheme panels           │
-└──────────────────────────────────────────────────────────────┘
+    |
+    v
++--------------------------------------------------------------+
+|  1. Render -- PyMuPDF @ 400 DPI                              |
+|     -> Page images (PNG)                                      |
++--------------------------------------------------------------+
+|  2. Detect -- DocLayout-YOLO figure detection                 |
+|     -> Bounding boxes for figures only                        |
+|     -> Quality filter: min_height, aspect_ratio, confidence   |
++--------------------------------------------------------------+
+|  3. Crop -- OpenCV + whitespace trim + padding               |
+|     -> Clean diagram crops (PNG)                              |
++--------------------------------------------------------------+
+|  4. Analyze -- LLM Vision or OCR                             |
+|     -> Extract questions from QP page images                  |
+|     -> Extract answers from MS page images                    |
+|     -> Match Q&A via smart number normalization               |
++--------------------------------------------------------------+
+|  5. Generate -- Static HTML workbook                          |
+|     -> 3-column layout: sidebar nav | question | answer       |
+|     -> Dashboard with search, stats, MCQ radios               |
+|     -> MathJax, diagrams inline, mark scheme panels           |
++--------------------------------------------------------------+
 ```
 
 ---
 
-## ✨ Features
+## Features
 
 | Feature | Detail |
 |---|---|
 | **Figure Detection** | DocLayout-YOLO pretrained on document layouts |
 | **False Positive Filter** | Aspect ratio + min height + confidence threshold kills dotted answer lines |
-| **Scanned PDF Q&A** | LLM vision extracts questions from image-only PDFs |
-| **Answer Matching** | Smart number normalization handles QP↔MS numbering mismatches (`5(i)` → `5(b)(i)`) |
+| **LLM Vision Analysis** | Extracts questions/answers from scanned PDFs via OpenAI-compatible API |
+| **OCR Fallback** | PaddleOCR + heuristic splitting when no API key available |
+| **Answer Matching** | Smart number normalization handles QP/MS numbering mismatches (`5(i)` -> `5(b)(i)`) |
 | **Parent Intro Texts** | Extracted as separate `Q1`, `Q2`... entries with diagram placement |
 | **HTML Workbook** | 3-column layout, search, MCQ radio buttons, MathJax, answer reveal toggle |
 | **Batch Processing** | Thousands of PDFs, automatic QP/MS pairing by filename |
+| **Interactive CLI** | Iterative launcher with guided prompts, loops for multiple runs |
 
 ---
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Setup
 
@@ -60,19 +62,19 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-For OCR (optional, heuristic fallback):
+For OCR (optional):
 ```powershell
 pip install -r requirements-ocr.txt
 ```
 
-For LLM analysis (recommended for scanned PDFs):
+For LLM analysis (recommended):
 ```powershell
 pip install -r requirements-llm.txt
 ```
 
 ### Model
 
-Auto-downloads DocLayout-YOLO from Hugging Face on first run.  
+Auto-downloads DocLayout-YOLO from Hugging Face on first run.
 To go offline: place `doclayout_yolo.pt` in `models/` and set `model.auto_download: false`.
 
 ### Configure API Key
@@ -85,17 +87,27 @@ KIMI_MODEL=kimi-k2.6
 KIMI_BASE_URL=https://api.sfkey.cn/v1
 ```
 
-Or use any OpenAI-compatible provider. See `config.yaml` → `analysis.llm.*`.
+Or use any OpenAI-compatible provider. See `config.yaml` -> `analysis.llm.*`.
 
 ---
 
-## 🎯 Run
+## Run
 
-### Full Pipeline — Extract + Analyze + HTML (Recommended)
+### Interactive CLI (Recommended)
 
 ```powershell
-# Only 2021 files in input/ (move other years out)
-python -m src.pipeline --config config.yaml --analyze --analysis-mode llm `
+python src/interactive_cli.py
+```
+
+Guided prompts for paper selection, pipeline stage, analysis mode, output options.
+After each run, asks "Run another pipeline?" and loops back.
+
+### Full Pipeline -- Extract + Analyze + HTML
+
+```powershell
+python -m src.pipeline --config config.yaml --input input\2021-qp.pdf `
+  --qp-pdf input\2021-qp.pdf --ms-pdf input\2021-ms.pdf `
+  --analyze --analysis-mode llm `
   --html --html-group-by-parent `
   --subject "IGCSE Biology" --year 2021 --paper-key "4BI1 1.0"
 ```
@@ -103,8 +115,10 @@ python -m src.pipeline --config config.yaml --analyze --analysis-mode llm `
 **Flags explained:**
 | Flag | Why |
 |---|---|
-| `--analysis-mode llm` | Forces LLM vision on every page. Avoids `auto` mode which mixes heuristic text (produces junk page-number questions). |
-| `--html-group-by-parent` | Groups sub-parts (`1(a)`, `1(b)`) under parent question (`1`). Produces 1 HTML per real question, not 1 per sub-part. |
+| `--input` | Limits extraction to this specific PDF (not all in input/) |
+| `--qp-pdf` / `--ms-pdf` | Specifies which files to analyze for Q&A extraction |
+| `--analysis-mode llm` | Forces LLM vision on every page |
+| `--html-group-by-parent` | Groups sub-parts (`1(a)`, `1(b)`) under parent question (`1`) |
 
 ### Extract Only (Diagrams + Metadata)
 
@@ -129,42 +143,41 @@ python -m src.pipeline --analyze `
 
 ---
 
-## ⚙️ Analysis Modes
+## Analysis Modes
 
 | Mode | Description |
 |---|---|
-| `auto` (default) | Prefers digital text, falls back to LLM vision, then OCR |
+| `auto` (default) | LLM vision if credentials available, falls back to OCR |
 | `llm` | Force OpenAI-compatible vision analysis (best for scanned PDFs) |
-| `digital` | PyMuPDF text extraction + heuristic splitting (fastest) |
 | `ocr` | PaddleOCR + heuristic splitting (no API key needed) |
 
 ---
 
-## 📁 Output Structure
+## Output Structure
 
 ```
 output/
-├── biology_2019_full/
-│   ├── page001/
-│   │   ├── page001_fig01.png          # cropped diagram
-│   │   └── page001_fig02.png
-│   ├── metadata.json                   # per-PDF diagram manifest
-│   ├── analysis/
-│   │   └── extracted_qna.json          # structured Q&A data
-│   └── html/
-│       ├── index.html                  # dashboard with stats + search
-│       ├── q_1.html                    # individual question page
-│       ├── q_2.html
-│       ├── ...
-│       ├── images/                     # staged diagram copies
-│       └── _site_assets/               # CSS + JS
-├── metadata.json                       # aggregate manifest
-└── analysis_manifest.json              # analysis summary
+  biology_2019_full/
+    page001/
+      page001_fig01.png          # cropped diagram
+      page001_fig02.png
+    metadata.json                   # per-PDF diagram manifest
+    analysis/
+      extracted_qna.json          # structured Q&A data
+    html/
+      index.html                  # dashboard with stats + search
+      q_1.html                    # individual question page
+      q_2.html
+      ...
+      images/                     # staged diagram copies
+      _site_assets/               # CSS + JS
+  metadata.json                       # aggregate manifest
+  analysis_manifest.json              # analysis summary
 ```
 
 ---
 
-## 🧩 Config Highlights (`config.yaml`)
+## Config Highlights (`config.yaml`)
 
 | Section | Key Setting |
 |---|---|
@@ -176,32 +189,38 @@ output/
 | `quality.min_height` | 400px (kills dotted answer lines) |
 | `quality.max_aspect_ratio` | 4.0 (kills wide strips) |
 | `quality.min_confidence` | 0.6 (kills low-confidence detections) |
-| `analysis.mode` | `auto` / `llm` / `ocr` / `digital` |
+| `analysis.mode` | `auto` / `llm` / `ocr` |
 | `analysis.llm` | API key, model, base URL, cache dir |
 | `html.group_by_parent` | Groups sub-parts under parent question |
 
 ---
 
-## 🛠 Code Layout
+## Code Layout
 
 ```
 src/
-├── pipeline.py         # main entry point, orchestrates stages
-├── render.py           # PyMuPDF → page images
-├── detect.py           # DocLayout-YOLO figure detection
-├── crop.py             # OpenCV crop + trim + quality filter
-├── ocr.py              # PaddleOCR label extraction
-├── question_analysis.py # LLM vision + heuristic Q&A extraction
-├── html_builder.py     # QNA/metadata → render-ready data
-├── html_generator.py   # Static HTML workbook generator
-└── utils.py            # config, paths, logging, helpers
+  interactive_cli.py   # iterative interactive launcher
+  pipeline.py          # main entry point, orchestrates stages
+  render.py            # PyMuPDF -> page images
+  detect.py            # DocLayout-YOLO figure detection
+  crop.py              # OpenCV crop + trim + quality filter
+  ocr.py               # PaddleOCR label extraction
+  question_analysis.py # LLM vision + heuristic Q&A extraction
+  html_builder.py      # QNA/metadata -> render-ready data
+  html_generator.py    # Static HTML workbook generator
+  utils.py             # config, paths, logging, helpers
 ```
 
 ---
 
-## 📝 Notes
+## Notes
 
-- **QP must be scanned?** Use `--analysis-mode llm` with a vision-capable API.
-- **MS must have digital text** for answer extraction (heuristic parsing).
-- **LLM responses are cached** in `.cache/question_analysis/` — delete to force re-analysis.
+- **Use `--analysis-mode llm`** with a vision-capable API for best results on scanned PDFs.
+- **LLM responses are cached** in `.cache/question_analysis/` -- delete to force re-analysis.
 - **False positive figures** (dotted answer lines) are filtered by `quality.min_height: 400` + `quality.max_aspect_ratio: 4.0` + `quality.min_confidence: 0.6`.
+- **Interactive CLI loops** after each run. Say "n" to exit, "y" to process another paper.
+- **`--input` limits extraction** to the specified PDF. Without it, all PDFs in `input/` are processed.
+
+---
+
+**Developed by Shaikat S. &middot; SugarClass Limited**
