@@ -545,8 +545,17 @@ def cleanup_qnas_with_llm(qnas: list[dict[str, Any]], llm_client: OpenAICompatib
     for qna in qnas:
         item = dict(qna)
         try:
-            item["text"] = llm_client.clean_question_html(str(item.get("text", "")))
-            item["answer_text"] = llm_client.clean_answer_html(str(item.get("answer_text", "")))
+            text = str(item.get("text", "")).strip()
+            if text:
+                item["text"] = llm_client.clean_question_html(text)
+            else:
+                item["text"] = ""
+
+            answer_text = str(item.get("answer_text", "")).strip()
+            if answer_text:
+                item["answer_text"] = llm_client.clean_answer_html(answer_text)
+            else:
+                item["answer_text"] = ""
         except Exception as exc:
             LOGGER.warning("LLM cleanup failed for question %s: %s", item.get("question_number"), exc)
         cleaned.append(item)

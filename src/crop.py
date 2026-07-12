@@ -71,9 +71,23 @@ def save_crop(crop: CropResult, output_path: Path) -> None:
         raise RuntimeError(f"Could not save crop: {output_path}")
 
 
-def passes_quality(crop: CropResult, quality_config: dict[str, object], confidence: float = 1.0) -> bool:
+def passes_quality(
+    crop: CropResult,
+    quality_config: dict[str, object],
+    confidence: float = 1.0,
+    page_width: int | None = None,
+    page_height: int | None = None,
+) -> bool:
     if not quality_config.get("enabled", False):
         return True
+
+    # Reject if both width and height coverage ratios exceed the max page ratios (e.g. 85%),
+    # indicating a full page grid or dotted writing space false positive.
+    if page_width is not None and page_height is not None:
+        max_w_ratio = float(quality_config.get("max_width_ratio", 1.0))
+        max_h_ratio = float(quality_config.get("max_height_ratio", 1.0))
+        if (crop.width / page_width > max_w_ratio) and (crop.height / page_height > max_h_ratio):
+            return False
 
     area = crop.width * crop.height
     aspect_ratio = max(crop.width, crop.height) / max(min(crop.width, crop.height), 1)

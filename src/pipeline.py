@@ -209,7 +209,13 @@ def crop_detection(
         whitespace_threshold=int(config["crop"].get("whitespace_threshold", 245)),
     )
 
-    if not passes_quality(crop, config["quality"], confidence=detection.confidence):
+    if not passes_quality(
+        crop,
+        config["quality"],
+        confidence=detection.confidence,
+        page_width=rendered_page.width,
+        page_height=rendered_page.height,
+    ):
         LOGGER.debug(
             "Rejected low-quality crop on page %s figure %s",
             rendered_page.page_number,
