@@ -16,6 +16,7 @@ from .utils import (
     make_pdf_output_dir,
     relative_to_or_absolute,
     resolve_path,
+    sanitize_name,
     setup_logging,
     write_json,
 )
@@ -65,16 +66,19 @@ def main() -> int:
     all_errors: list[dict[str, Any]] = []
     input_root = input_path if input_path.is_dir() else input_path.parent
 
+    # Assets folder under output root
+    assets_root = ensure_dir(output_root / "assets")
+
     for pdf_path in pdfs:
         try:
-            diagrams, errors = process_pdf(pdf_path, input_root, output_root, config, detector, ocr_extractor)
+            diagrams, errors = process_pdf(pdf_path, input_root, assets_root, config, detector, ocr_extractor)
             all_diagrams.extend(diagrams)
             all_errors.extend(errors)
         except Exception as exc:
             LOGGER.exception("Failed to process %s", pdf_path)
             all_errors.append({"pdf": str(pdf_path), "error": str(exc)})
 
-    metadata_path = output_root / "metadata.json"
+    metadata_path = assets_root / "metadata.json"
     write_json(
         metadata_path,
         {
@@ -84,11 +88,11 @@ def main() -> int:
         },
     )
 
-    qna_json_path = maybe_analyze_questions(pdfs, input_root, output_root, metadata_path, config, base_dir)
+    qna_json_path = maybe_analyze_questions(pdfs, input_root, assets_root, metadata_path, config, base_dir)
     if qna_json_path is not None and not (config.get("html") or {}).get("qna_json"):
         config.setdefault("html", {})["qna_json"] = str(qna_json_path)
 
-    maybe_build_html(config, base_dir, output_root)
+    maybe_build_html(config, base_dir, output_root, pdfs, input_root)
     LOGGER.info("Done. Extracted %s diagrams from %s PDFs", len(all_diagrams), len(pdfs))
     return 0 if not all_errors else 1
 
@@ -347,15 +351,30 @@ def maybe_analyze_questions(
     )
 
 
-def maybe_build_html(config: dict[str, Any], base_dir: Path, output_root: Path) -> None:
+def maybe_build_html(config: dict[str, Any], base_dir: Path, output_root: Path, pdfs: list[Path], input_root: Path) -> None:
     html_config = config.get("html") or {}
     if not html_config.get("enabled", False):
         return
 
     from .html_builder import build_from_metadata, build_from_qna_json
 
+    # Determine paper name from processed PDFs
+    if pdfs:
+        pdf_path = pdfs[0]
+        try:
+            relative = pdf_path.relative_to(input_root)
+            paper_name = sanitize_name(relative.parts[0])
+        except ValueError:
+            paper_name = sanitize_name(pdf_path.stem)
+    else:
+        paper_name = "default"
+
     output_value = html_config.get("output_dir")
-    html_output_dir = ensure_dir(resolve_path(output_value, base_dir)) if output_value else ensure_dir(output_root / "html")
+    if output_value:
+        html_output_dir = ensure_dir(resolve_path(output_value, base_dir))
+    else:
+        html_output_dir = ensure_dir(output_root / "htmls" / paper_name)
+
     qna_json = html_config.get("qna_json")
 
     common_options = {
@@ -373,7 +392,8 @@ def maybe_build_html(config: dict[str, Any], base_dir: Path, output_root: Path) 
             **common_options,
         )
     else:
-        summary = build_from_metadata(output_root / "metadata.json", **common_options)
+        assets_root = output_root / "assets"
+        summary = build_from_metadata(assets_root / "metadata.json", **common_options)
 
     LOGGER.info("HTML dashboard generated: %s", summary["dashboard"])
 

@@ -387,28 +387,33 @@ def stage_associated_images(
     if not images:
         return
 
-    output_images_dir = ensure_dir(output_dir / "images")
     text_html = str(qna.get("text_html") or "")
     staged_sources: list[str] = []
 
+    import base64
+    import mimetypes
+
     for image_value in images:
         source_image = resolve_existing_image(image_value, source_dir)
-        if source_image and copy_images:
-            destination = unique_image_destination(source_image, output_images_dir)
-            if source_image.resolve() != destination.resolve():
-                shutil.copy2(source_image, destination)
-            relative_src = f"images/{destination.name}"
-        else:
-            relative_src = normalize_html_image_src(image_value)
-
-        if not relative_src:
+        if not source_image or not source_image.exists():
             continue
 
-        text_html = replace_image_references(text_html, image_value, source_image, relative_src)
-        if not html_references_image(text_html, relative_src, image_value):
-            text_html += "\n" + figure_html(relative_src, Path(image_value).name)
+        # Convert to Base64 Data URI
+        mime_type, _ = mimetypes.guess_type(source_image)
+        if not mime_type:
+            mime_type = "image/png"
+        try:
+            with source_image.open("rb") as f:
+                encoded = base64.b64encode(f.read()).decode("utf-8")
+            base64_src = f"data:{mime_type};base64,{encoded}"
+        except Exception:
+            continue
 
-        staged_sources.append(relative_src)
+        text_html = replace_image_references(text_html, image_value, source_image, base64_src)
+        if not html_references_image(text_html, base64_src, image_value):
+            text_html += "\n" + figure_html(base64_src, Path(image_value).name)
+
+        staged_sources.append(base64_src)
 
     text_html = remove_figure_captions(text_html)
     qna["text_html"] = text_html
@@ -554,10 +559,32 @@ def normalize_image_list(value: Any) -> list[str]:
 def resolve_existing_image(image_value: str, source_dir: Path | None) -> Path | None:
     image_path = Path(image_value)
     candidates = [image_path] if image_path.is_absolute() else []
+    
+    # If absolute path doesn't exist, try resolving under assets/
+    if image_path.is_absolute():
+        parts = image_path.parts
+        if "output" in parts:
+            idx = parts.index("output")
+            # Try inserting 'assets' into path
+            new_parts = list(parts[:idx+1]) + ["assets"] + list(parts[idx+1:])
+            candidates.append(Path(*new_parts))
+            
     if source_dir and not image_path.is_absolute():
         candidates.append(source_dir / image_path)
     if not image_path.is_absolute():
         candidates.append(Path.cwd() / image_path)
+
+    # Search relative to source_dir even if absolute path is stored
+    if source_dir:
+        candidates.append(source_dir.parent / image_path.name)
+        candidates.append(source_dir.parent.parent / image_path.name)
+        try:
+            if len(image_path.parts) >= 2:
+                sub_path = Path(image_path.parts[-2]) / image_path.parts[-1]
+                candidates.append(source_dir.parent / sub_path)
+                candidates.append(source_dir.parent.parent / sub_path)
+        except Exception:
+            pass
 
     for candidate in candidates:
         if candidate.is_file():

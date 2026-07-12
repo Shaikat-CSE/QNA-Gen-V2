@@ -28,7 +28,7 @@ class HTMLGenerator:
         os.makedirs(target_assets_dir, exist_ok=True)
 
         # Custom Premium Stylesheet (site.css)
-        css_content = """/* Premium Exam Workbook Design System */
+        self.css_content = """/* Premium Exam Workbook Design System */
 :root {
   --font-family-title: 'Outfit', -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --font-family-body: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -913,7 +913,7 @@ h1, h2, h3, h4, h5, h6 {
 """
 
         # 2. Custom Interactive Scripts (site.js)
-        js_content = """document.addEventListener('DOMContentLoaded', function() {
+        self.js_content = """document.addEventListener('DOMContentLoaded', function() {
   // Toggle answer functionality
   const toggleBtn = document.getElementById('toggleAnswerBtn');
   const answerContent = document.getElementById('answerContent');
@@ -974,9 +974,9 @@ h1, h2, h3, h4, h5, h6 {
 """
 
         with open(os.path.join(target_assets_dir, "site.css"), "w", encoding="utf-8") as f:
-            f.write(css_content)
+            f.write(self.css_content)
         with open(os.path.join(target_assets_dir, "site.js"), "w", encoding="utf-8") as f:
-            f.write(js_content)
+            f.write(self.js_content)
         print("Workbook generator wrote CSS/JS static assets successfully.")
 
     def _get_q_filename(self, q_num):
@@ -1041,7 +1041,9 @@ h1, h2, h3, h4, h5, h6 {
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;700;800&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="{self.assets_dir_name}/site.css">
+  <style>
+    {self.css_content}
+  </style>
   
   <!-- MathJax Configuration for Chemistry/Physics Formulas -->
   <script>
@@ -1108,7 +1110,9 @@ h1, h2, h3, h4, h5, h6 {
       </section>
     </div>
   </div>
-  <script src="{self.assets_dir_name}/site.js"></script>
+  <script>
+    {self.js_content}
+  </script>
 </body>
 </html>
 """
@@ -1177,7 +1181,9 @@ h1, h2, h3, h4, h5, h6 {
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;700;800&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="{self.assets_dir_name}/site.css">
+  <style>
+    {self.css_content}
+  </style>
   <style>
     .dashboard-stat-card {{
       background: white;
