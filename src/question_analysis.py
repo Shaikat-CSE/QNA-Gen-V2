@@ -197,49 +197,112 @@ def analyze_question_pdf(
         else {}
     )
 
-    with ProgressBar(f"Analyze QP {pdf_path.name}", total_pages) as progress:
-        if workers <= 1:
-            for rendered_page in rendered_pages:
-                page_plan = page_plans.get(rendered_page.page_number)
-                active_question = planned_active_question(page_plan, active_question)
-                normalized, active_question, backend = analyze_question_page_render(
-                    rendered_page,
-                    diagrams_by_page,
-                    mode,
-                    llm_client,
-                    ocr_engine,
-                    active_question,
-                    keep_pages,
-                    page_plan=page_plan,
-                )
-                questions.extend(normalized)
-                LOGGER.debug(
-                    "QP page %s analyzed with %s backend: %s question block(s)",
-                    rendered_page.page_number,
-                    backend,
-                    len(normalized),
-                )
-                progress.update()
-        else:
-            LOGGER.info("Analyzing QP pages with %s worker(s)", workers)
-            with ThreadPoolExecutor(max_workers=workers) as executor:
-                futures = {
-                    executor.submit(
-                        analyze_question_page_render,
+    batch_size = max(1, int(config.get("batch_size", 1)))
+    backend = choose_backend(mode, llm_client, ocr_engine)
+
+    if batch_size > 1 and backend == "llm" and llm_client is not None:
+        batches = [
+            rendered_pages[i : i + batch_size]
+            for i in range(0, len(rendered_pages), batch_size)
+        ]
+
+        def process_batch(batch_pages: list[Any], active_q_start: str) -> tuple[list[dict[str, Any]], str]:
+            image_paths = [p.image_path for p in batch_pages]
+            page_numbers = [p.page_number for p in batch_pages]
+            plans = {p.page_number: page_plans.get(p.page_number, {}) for p in batch_pages}
+            
+            batch_questions = llm_client.analyze_question_pages_batch(
+                image_paths=image_paths,
+                page_numbers=page_numbers,
+                active_question=active_q_start,
+                diagrams_by_page=diagrams_by_page,
+                page_plans=plans,
+            )
+            
+            normalized_list = []
+            for question in batch_questions:
+                p_num = normalize_int_or_none(question.get("page"))
+                if p_num not in page_numbers:
+                    p_num = page_numbers[0]
+                
+                p_diagrams = diagrams_by_page.get(p_num, [])
+                norm_q = normalize_question_block(question, p_num, p_diagrams)
+                normalized_list.append(norm_q)
+                
+            next_active = active_q_start
+            for q in normalized_list:
+                q_num = str(q.get("question_number", ""))
+                match = re.match(r"^(\d+)", q_num)
+                if match:
+                    next_active = match.group(1)
+            
+            normalized_list = fix_orphan_subparts(normalized_list, next_active)
+            return normalized_list, next_active
+
+        with ProgressBar(f"Analyze QP {pdf_path.name}", total_pages) as progress:
+            if workers <= 1:
+                for batch in batches:
+                    first_page_plan = page_plans.get(batch[0].page_number)
+                    active_question = planned_active_question(first_page_plan, active_question)
+                    try:
+                        normalized, active_question = process_batch(batch, active_question)
+                        questions.extend(normalized)
+                        LOGGER.debug(
+                            "QP pages %s analyzed in batch with LLM: %s question block(s)",
+                            [p.page_number for p in batch],
+                            len(normalized),
+                        )
+                    except Exception as exc:
+                        LOGGER.exception("Failed QP batch %s", [p.page_number for p in batch])
+                    finally:
+                        if not keep_pages:
+                            for rp in batch:
+                                rp.image_path.unlink(missing_ok=True)
+                        progress.update(len(batch))
+            else:
+                LOGGER.info("Analyzing QP pages in batches with %s worker(s)", workers)
+                with ThreadPoolExecutor(max_workers=workers) as executor:
+                    futures = {
+                        executor.submit(
+                            process_batch,
+                            batch,
+                            planned_active_question(page_plans.get(batch[0].page_number), "unknown")
+                        ): batch
+                        for batch in batches
+                    }
+                    for future in as_completed(futures):
+                        batch = futures[future]
+                        try:
+                            normalized, _ = future.result()
+                            questions.extend(normalized)
+                            LOGGER.debug(
+                                "QP pages %s analyzed in batch with LLM: %s question block(s)",
+                                [p.page_number for p in batch],
+                                len(normalized),
+                            )
+                        except Exception as exc:
+                            LOGGER.exception("Failed QP batch %s", [p.page_number for p in batch])
+                        finally:
+                            if not keep_pages:
+                                for rp in batch:
+                                    rp.image_path.unlink(missing_ok=True)
+                            progress.update(len(batch))
+    else:
+        with ProgressBar(f"Analyze QP {pdf_path.name}", total_pages) as progress:
+            if workers <= 1:
+                for rendered_page in rendered_pages:
+                    page_plan = page_plans.get(rendered_page.page_number)
+                    active_question = planned_active_question(page_plan, active_question)
+                    normalized, active_question, backend = analyze_question_page_render(
                         rendered_page,
                         diagrams_by_page,
                         mode,
                         llm_client,
                         ocr_engine,
-                        planned_active_question(page_plans.get(rendered_page.page_number), "unknown"),
+                        active_question,
                         keep_pages,
-                        page_plan=page_plans.get(rendered_page.page_number),
-                    ): rendered_page
-                    for rendered_page in rendered_pages
-                }
-                for future in as_completed(futures):
-                    rendered_page = futures[future]
-                    normalized, _active_question, backend = future.result()
+                        page_plan=page_plan,
+                    )
                     questions.extend(normalized)
                     LOGGER.debug(
                         "QP page %s analyzed with %s backend: %s question block(s)",
@@ -248,6 +311,34 @@ def analyze_question_pdf(
                         len(normalized),
                     )
                     progress.update()
+            else:
+                LOGGER.info("Analyzing QP pages with %s worker(s)", workers)
+                with ThreadPoolExecutor(max_workers=workers) as executor:
+                    futures = {
+                        executor.submit(
+                            analyze_question_page_render,
+                            rendered_page,
+                            diagrams_by_page,
+                            mode,
+                            llm_client,
+                            ocr_engine,
+                            planned_active_question(page_plans.get(rendered_page.page_number), "unknown"),
+                            keep_pages,
+                            page_plan=page_plans.get(rendered_page.page_number),
+                        ): rendered_page
+                        for rendered_page in rendered_pages
+                    }
+                    for future in as_completed(futures):
+                        rendered_page = futures[future]
+                        normalized, _active_question, backend = future.result()
+                        questions.extend(normalized)
+                        LOGGER.debug(
+                            "QP page %s analyzed with %s backend: %s question block(s)",
+                            rendered_page.page_number,
+                            backend,
+                            len(normalized),
+                        )
+                        progress.update()
 
     if not keep_pages:
         try_remove_dir(pages_dir)
@@ -529,41 +620,85 @@ def analyze_mark_scheme_pdf(
     ))
     rendered_pages = normalize_rendered_pages_to_square(rendered_pages, image_size)
 
-    with ProgressBar(f"Analyze MS {pdf_path.name}", total_pages) as progress:
-        if workers <= 1:
-            for rendered_page in rendered_pages:
-                normalized, backend = analyze_mark_scheme_page_render(
-                    rendered_page,
-                    mode,
-                    llm_client,
-                    ocr_engine,
-                    keep_pages,
-                )
-                answers.extend(normalized)
-                LOGGER.debug(
-                    "MS page %s analyzed with %s backend: %s answer block(s)",
-                    rendered_page.page_number,
-                    backend,
-                    len(normalized),
-                )
-                progress.update()
-        else:
-            LOGGER.info("Analyzing MS pages with %s worker(s)", workers)
-            with ThreadPoolExecutor(max_workers=workers) as executor:
-                futures = {
-                    executor.submit(
-                        analyze_mark_scheme_page_render,
+    batch_size = max(1, int(config.get("batch_size", 1)))
+    backend = choose_backend(mode, llm_client, ocr_engine)
+
+    if batch_size > 1 and backend == "llm" and llm_client is not None:
+        batches = [
+            rendered_pages[i : i + batch_size]
+            for i in range(0, len(rendered_pages), batch_size)
+        ]
+
+        def process_ms_batch(batch_pages: list[Any]) -> list[dict[str, Any]]:
+            image_paths = [p.image_path for p in batch_pages]
+            page_numbers = [p.page_number for p in batch_pages]
+            batch_answers = llm_client.analyze_mark_scheme_pages_batch(
+                image_paths=image_paths,
+                page_numbers=page_numbers,
+            )
+            
+            normalized_list = []
+            for answer in batch_answers:
+                p_num = normalize_int_or_none(answer.get("page"))
+                if p_num not in page_numbers:
+                    p_num = page_numbers[0]
+                norm_a = normalize_answer_block(answer, p_num)
+                normalized_list.append(norm_a)
+            return normalized_list
+
+        with ProgressBar(f"Analyze MS {pdf_path.name}", total_pages) as progress:
+            if workers <= 1:
+                for batch in batches:
+                    try:
+                        normalized = process_ms_batch(batch)
+                        answers.extend(normalized)
+                        LOGGER.debug(
+                            "MS pages %s analyzed in batch with LLM: %s answer block(s)",
+                            [p.page_number for p in batch],
+                            len(normalized),
+                        )
+                    except Exception as exc:
+                        LOGGER.exception("Failed MS batch %s", [p.page_number for p in batch])
+                    finally:
+                        if not keep_pages:
+                            for rp in batch:
+                                rp.image_path.unlink(missing_ok=True)
+                        progress.update(len(batch))
+            else:
+                LOGGER.info("Analyzing MS pages in batches with %s worker(s)", workers)
+                with ThreadPoolExecutor(max_workers=workers) as executor:
+                    futures = {
+                        executor.submit(process_ms_batch, batch): batch
+                        for batch in batches
+                    }
+                    for future in as_completed(futures):
+                        batch = futures[future]
+                        try:
+                            normalized = future.result()
+                            answers.extend(normalized)
+                            LOGGER.debug(
+                                "MS pages %s analyzed in batch with LLM: %s answer block(s)",
+                                [p.page_number for p in batch],
+                                len(normalized),
+                            )
+                        except Exception as exc:
+                            LOGGER.exception("Failed MS batch %s", [p.page_number for p in batch])
+                        finally:
+                            if not keep_pages:
+                                for rp in batch:
+                                    rp.image_path.unlink(missing_ok=True)
+                            progress.update(len(batch))
+    else:
+        with ProgressBar(f"Analyze MS {pdf_path.name}", total_pages) as progress:
+            if workers <= 1:
+                for rendered_page in rendered_pages:
+                    normalized, backend = analyze_mark_scheme_page_render(
                         rendered_page,
                         mode,
                         llm_client,
                         ocr_engine,
                         keep_pages,
-                    ): rendered_page
-                    for rendered_page in rendered_pages
-                }
-                for future in as_completed(futures):
-                    rendered_page = futures[future]
-                    normalized, backend = future.result()
+                    )
                     answers.extend(normalized)
                     LOGGER.debug(
                         "MS page %s analyzed with %s backend: %s answer block(s)",
@@ -572,6 +707,31 @@ def analyze_mark_scheme_pdf(
                         len(normalized),
                     )
                     progress.update()
+            else:
+                LOGGER.info("Analyzing MS pages with %s worker(s)", workers)
+                with ThreadPoolExecutor(max_workers=workers) as executor:
+                    futures = {
+                        executor.submit(
+                            analyze_mark_scheme_page_render,
+                            rendered_page,
+                            mode,
+                            llm_client,
+                            ocr_engine,
+                            keep_pages,
+                        ): rendered_page
+                        for rendered_page in rendered_pages
+                    }
+                    for future in as_completed(futures):
+                        rendered_page = futures[future]
+                        normalized, backend = future.result()
+                        answers.extend(normalized)
+                        LOGGER.debug(
+                            "MS page %s analyzed with %s backend: %s answer block(s)",
+                            rendered_page.page_number,
+                            backend,
+                            len(normalized),
+                        )
+                        progress.update()
 
     if not keep_pages:
         try_remove_dir(pages_dir)
@@ -756,6 +916,125 @@ Required JSON shape:
 }
 """
         payload = self._image_json_request(image_path, prompt, cache_prefix=f"ms_p{page_number}")
+        answers = payload.get("answers", []) if isinstance(payload, dict) else []
+        return answers if isinstance(answers, list) else []
+
+    def analyze_question_pages_batch(
+        self,
+        image_paths: list[Path],
+        page_numbers: list[int],
+        active_question: str,
+        diagrams_by_page: dict[int, list[dict[str, Any]]],
+        page_plans: dict[int, dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        diagrams_payload = {}
+        for p_num in page_numbers:
+            p_diagrams = diagrams_by_page.get(p_num, [])
+            diagrams_payload[p_num] = [
+                {
+                    "diagram_id": diagram["diagram_id"],
+                    "box_1000": diagram["box_1000"],
+                    "file": diagram.get("file"),
+                }
+                for diagram in p_diagrams
+            ]
+
+        prompt = f"""You are analyzing a sequence of {len(image_paths)} pages of an exam question paper in reading order.
+
+Return only valid JSON. Do not include markdown fences.
+
+Task:
+1. Extract every real question/sub-question visible on these pages in reading order.
+2. For each question, specify the "page" number (an integer from the list {page_numbers}).
+3. Preserve the question numbering exactly, e.g. "1", "1(a)", "1(b)(ii)".
+4. If a question continues from the previous page/context and the parent number is not shown, use the page plans and the active parent question "{active_question}" at the start of the batch.
+5. CRITICAL: Always extract the intro/context text that appears before the first sub-question as a separate question with the parent number only (e.g. "1", "2", "3"). This intro text often describes a diagram, experiment, or scenario. Do NOT merge it into the first sub-question.
+6. Clean the question text for HTML presentation: remove page headers/footers, page numbers, candidate instructions that are not part of a question, answer dotted lines, repeated underscores, and handwriting space.
+7. Preserve science/math notation using LaTeX delimiters \\( ... \\) or \\[ ... \\].
+8. For MCQs, put options in mcq_options and do not duplicate them in text.
+9. For tables, output clean table_html and do not duplicate raw table text.
+10. Each question must include a tight box_1000 as [ymin, xmin, ymax, xmax] relative to that page image.
+11. Do not detect or crop diagrams. Use only the supplied diagrams list for association.
+12. If a supplied diagram belongs inside a question, include its id in associated_diagram_ids and insert [DIAGRAM:diagram_id] in the text at the visual position where it belongs.
+
+Supplied diagrams on these pages:
+{json.dumps(diagrams_payload, ensure_ascii=False)}
+
+Precomputed page sequence plans:
+{json.dumps(page_plans, ensure_ascii=False)}
+
+Required JSON shape:
+{{
+  "questions": [
+    {{
+      "page": {page_numbers[0]},
+      "question_number": "1",
+      "text": "The diagram shows a plant cell. This is the intro/context for the whole question.",
+      "marks": null,
+      "table_html": null,
+      "is_mcq": false,
+      "mcq_options": null,
+      "box_1000": [100, 80, 240, 900],
+      "associated_diagram_ids": ["p2f1"]
+    }},
+    {{
+      "page": {page_numbers[0]},
+      "question_number": "1(a)",
+      "text": "Name the structures labelled A, B, C, and D.",
+      "marks": 4,
+      "table_html": null,
+      "is_mcq": false,
+      "mcq_options": null,
+      "box_1000": [100, 80, 240, 900],
+      "associated_diagram_ids": ["p2f1"]
+    }}
+  ]
+}}
+"""
+        payload = self._multi_image_json_request(
+            image_paths,
+            prompt,
+            cache_prefix=f"qp_batch_p{page_numbers[0]}_to_p{page_numbers[-1]}",
+        )
+        questions = payload.get("questions", []) if isinstance(payload, dict) else []
+        return questions if isinstance(questions, list) else []
+
+    def analyze_mark_scheme_pages_batch(
+        self,
+        image_paths: list[Path],
+        page_numbers: list[int],
+    ) -> list[dict[str, Any]]:
+        prompt = f"""You are analyzing a sequence of {len(image_paths)} pages of an exam mark scheme in reading order.
+
+Return only valid JSON. Do not include markdown fences.
+
+Task:
+1. Extract answer/marking guidance blocks for each question number visible on these pages.
+2. For each answer, specify the "page" number (an integer from the list {page_numbers}).
+3. Preserve question numbering exactly, e.g. "1(a)", "1(b)(ii)".
+4. Clean answer content for HTML: remove generic boilerplate, wrong-option explanations unless needed for the correct answer, repeated headers, footers, page numbers, and empty table artifacts.
+5. Keep actual marking points, accepted alternatives, equations, mark counts, and important additional guidance.
+6. Use concise HTML in answer_html: paragraphs, ul/li, table/tr/th/td, br, strong are allowed.
+7. Each answer should include box_1000 as [ymin, xmin, ymax, xmax] relative to that page image when possible.
+
+Required JSON shape:
+{{
+  "answers": [
+    {{
+      "page": {page_numbers[0]},
+      "question_number": "1(a)",
+      "answer_html": "<ul><li>marking point</li></ul>",
+      "marks": 2,
+      "box_1000": [100, 80, 240, 900]
+    }}
+  ]
+}}
+"""
+        payload = self._multi_image_json_request(
+            image_paths,
+            prompt,
+            cache_prefix=f"ms_batch_p{page_numbers[0]}_to_p{page_numbers[-1]}",
+        )
         answers = payload.get("answers", []) if isinstance(payload, dict) else []
         return answers if isinstance(answers, list) else []
 
@@ -1864,3 +2143,36 @@ def try_remove_dir(path: Path) -> None:
         path.rmdir()
     except OSError:
         pass
+
+
+def find_unprocessed_pairs(
+    pdfs: list[Path],
+    input_root: Path,
+    output_root: Path,
+    base_dir: Path,
+) -> list[ExamPair]:
+    """Find QP/MS pairs that haven't been processed yet."""
+    all_pairs = find_exam_pairs(pdfs, {}, base_dir)
+    unprocessed: list[ExamPair] = []
+
+    for pair in all_pairs:
+        qp_stem = pair.question_pdf.stem
+        qna_json = output_root / "assets" / qp_stem / "analysis" / "extracted_qna.json"
+
+        if qna_json.exists():
+            continue
+
+        html_marker = output_root / "htmls"
+        if html_marker.exists():
+            for html_dir in html_marker.iterdir():
+                if html_dir.is_dir() and qp_stem.lower() in html_dir.name.lower():
+                    qna_json_alt = html_dir / "qna.json"
+                    if qna_json_alt.exists():
+                        break
+            else:
+                unprocessed.append(pair)
+                continue
+        else:
+            unprocessed.append(pair)
+
+    return unprocessed

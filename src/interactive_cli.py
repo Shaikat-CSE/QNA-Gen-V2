@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import builtins
 import os
 import re
 import shlex
@@ -11,10 +12,10 @@ from typing import Any
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from src.question_analysis import ExamPair, find_exam_pairs
+    from src.question_analysis import ExamPair, find_exam_pairs, find_unprocessed_pairs
     from src.utils import list_pdfs, load_config, relative_to_or_absolute, resolve_path
 else:
-    from .question_analysis import ExamPair, find_exam_pairs
+    from .question_analysis import ExamPair, find_exam_pairs, find_unprocessed_pairs
     from .utils import list_pdfs, load_config, relative_to_or_absolute, resolve_path
 
 USE_COLOR = (
@@ -22,6 +23,50 @@ USE_COLOR = (
     and os.environ.get("TERM") != "dumb"
     and sys.stdout.isatty()
 )
+
+
+def print(*args: Any, **kwargs: Any) -> None:
+    sep = kwargs.get("sep", " ")
+    end = kwargs.get("end", "\n")
+    file = kwargs.get("file", sys.stdout)
+    if file not in (sys.stdout, sys.stderr):
+        builtins.print(*args, **kwargs)
+        return
+    text = sep.join(str(arg) for arg in args)
+    try:
+        builtins.print(text, sep=sep, end=end, file=file, flush=kwargs.get("flush", False))
+    except UnicodeEncodeError:
+        replacements = {
+            "\u2500": "-",
+            "\u2550": "=",
+            "\u2554": "+",
+            "\u2557": "+",
+            "\u255a": "+",
+            "\u255d": "+",
+            "\u2551": "|",
+            "\u2714": "[*]",
+            "\u2713": "[ok]",
+            "\u26a0": "[!]",
+            "\u2014": "-",
+            "██": "##",
+            "█": "#",
+            "╔": "+",
+            "╗": "+",
+            "╚": "+",
+            "╝": "+",
+            "═": "=",
+            "║": "|",
+            "═══": "===",
+        }
+        cleaned = text
+        for uni_char, ascii_char in replacements.items():
+            cleaned = cleaned.replace(uni_char, ascii_char)
+        try:
+            builtins.print(cleaned, sep=sep, end=end, file=file, flush=kwargs.get("flush", False))
+        except UnicodeEncodeError:
+            encoding = getattr(file, "encoding", "utf-8") or "utf-8"
+            fallback = cleaned.encode(encoding, errors="replace").decode(encoding)
+            builtins.print(fallback, sep=sep, end=end, file=file, flush=kwargs.get("flush", False))
 
 
 def _color(code: str, text: str) -> str:
@@ -72,16 +117,32 @@ EMDASH = "\u2014"
 
 
 def _banner() -> None:
-    tl = "\u2554" + "\u2550" * 52 + "\u2557"
-    mid_l = "\u2551"
-    mid_r = "\u2551"
-    bl = "\u255a" + "\u2550" * 52 + "\u255d"
-    title = "QNA Pipeline Interactive Launcher"
-    pad = (52 - len(title)) // 2
+    banner_lines = [
+        " ██████╗ ███╗   ██╗ █████╗      ██████╗ ███████╗███╗   ██╗",
+        "██╔═══██╗████╗  ██║██╔══██╗    ██╔════╝ ██╔════╝████╗  ██║",
+        "██║   ██║██╔██╗ ██║███████║    ██║  ███╗█████╗  ██╔██╗ ██║",
+        "██║▄▄ ██║██║╚██╗██║██╔══██║    ██║   ██║██╔══╝  ██║╚██╗██║",
+        "╚██████╔╝██║ ╚████║██║  ██║    ╚██████╔╝███████╗██║ ╚████║",
+        " ╚══▀▀═╝ ╚═╝  ╚═══╝╚═╝  ╚═╝     ╚═════╝ ╚══════╝╚═╝  ╚═══╝",
+    ]
+    
     print()
-    print(f"  {_bold(_cyan(tl))}")
-    print(f"  {_bold(_cyan(mid_l))} {' ' * pad}{_bold(title)}{' ' * (52 - pad - len(title))} {_bold(_cyan(mid_r))}")
-    print(f"  {_bold(_cyan(bl))}")
+    try:
+        for line in banner_lines:
+            print(f"  {_color('38;5;214', line)}")
+        print(f"  {_bold(_cyan('═══ QNA Pipeline Interactive Launcher ═══'))}")
+    except UnicodeEncodeError:
+        ascii_banner = [
+            "=========================================================",
+            "  __  _  _   __      ___  ___  _  _ ",
+            " /  \ |\ |  /  \\    /  _  |__  |\\ | ",
+            " \\__\\ | \\| /____\\\\   \\\\____ |___ | \\| ",
+            "=========================================================",
+        ]
+        for line in ascii_banner:
+            print(f"  {_color('38;5;214', line)}")
+        print(f"  {_bold(_cyan('--- QNA Pipeline Interactive Launcher ---'))}")
+    print()
 
 
 def _info(label: str, value: str) -> None:
@@ -117,6 +178,24 @@ def main() -> int:
         pdfs = list_pdfs(input_path)
         input_root = input_path if input_path.is_dir() else input_path.parent
 
+        _section("Launcher Mode")
+        mode = prompt_choice(
+            "Select action mode",
+            [
+                ("Auto generation of remaining papers", "auto"),
+                ("Manual processing", "manual"),
+            ],
+            default="auto",
+        )
+
+        if mode == "auto":
+            last_return_code = auto_process_remaining(config_path, base_dir)
+            print()
+            if prompt_yes_no("Run another pipeline?", default=False):
+                print()
+                continue
+            break
+
         command = [sys.executable, "-m", "src.pipeline", "--config", str(config_path)]
 
         _section("Choose Papers")
@@ -137,27 +216,19 @@ def main() -> int:
         action = prompt_choice(
             "What do you want to run?",
             [
-                ("Auto-process all unprocessed pairs", "auto"),
                 ("Full pipeline: extract + analyze + HTML", "full"),
                 ("Extract + analyze only", "analyze"),
                 ("Extract diagrams only", "extract"),
             ],
-            default="auto",
+            default="full",
         )
         action_labels = {
-            "auto": "Auto-process unprocessed pairs",
             "full": "Full pipeline",
             "analyze": "Extract + analyze",
             "extract": "Extract diagrams only",
         }
         _summary("Action", action_labels[action])
 
-        if action == "auto":
-            last_return_code = auto_process_remaining(config_path, base_dir)
-            if prompt_yes_no("Run another pipeline?", default=False):
-                print()
-                continue
-            break
 
         if action in {"full", "analyze"}:
             command.append("--analyze")
@@ -538,37 +609,7 @@ def format_command(command: list[str]) -> str:
     return " ".join(shlex.quote(part) for part in display)
 
 
-def find_unprocessed_pairs(
-    pdfs: list[Path],
-    input_root: Path,
-    output_root: Path,
-    base_dir: Path,
-) -> list[ExamPair]:
-    """Find QP/MS pairs that haven't been processed yet."""
-    all_pairs = find_exam_pairs(pdfs, {}, base_dir)
-    unprocessed: list[ExamPair] = []
-
-    for pair in all_pairs:
-        qp_stem = pair.question_pdf.stem
-        qna_json = output_root / "assets" / qp_stem / "analysis" / "extracted_qna.json"
-
-        if qna_json.exists():
-            continue
-
-        html_marker = output_root / "htmls"
-        if html_marker.exists():
-            for html_dir in html_marker.iterdir():
-                if html_dir.is_dir() and qp_stem.lower() in html_dir.name.lower():
-                    qna_json_alt = html_dir / "qna.json"
-                    if qna_json_alt.exists():
-                        break
-            else:
-                unprocessed.append(pair)
-                continue
-        else:
-            unprocessed.append(pair)
-
-    return unprocessed
+# find_unprocessed_pairs imported from src.question_analysis
 
 
 def build_auto_process_command(
@@ -638,16 +679,23 @@ def auto_process_remaining(
         env = os.environ.copy()
         python_path = env.get("PYTHONPATH", "")
         env["PYTHONPATH"] = str(base_dir) + (os.pathsep + python_path if python_path else "")
-        completed = subprocess.run(command, cwd=base_dir, env=env)
-        last_return_code = int(completed.returncode)
-
-        if last_return_code == 0:
-            _ok(f"Completed: {pair.question_pdf.name}")
-        else:
-            _warn(f"Failed: {pair.question_pdf.name} (exit code {last_return_code})")
+        try:
+            completed = subprocess.run(command, cwd=base_dir, env=env)
+            last_return_code = int(completed.returncode)
+            if last_return_code == 0:
+                _ok(f"Completed: {pair.question_pdf.name}")
+            else:
+                _warn(f"Failed: {pair.question_pdf.name} (exit code {last_return_code})")
+        except Exception as exc:
+            _warn(f"Error running pipeline for {pair.question_pdf.name}: {exc}")
+            last_return_code = 1
 
     return last_return_code
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except KeyboardInterrupt:
+        print("\n\n  Cancelled by user. Exiting...")
+        sys.exit(130)

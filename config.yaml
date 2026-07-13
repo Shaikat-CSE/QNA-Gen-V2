@@ -32,7 +32,7 @@ quality:
   min_width: 64
   min_height: 400
   min_area: 4096
-  max_blank_ratio: 0.93
+  max_blank_ratio: 0.97
   max_aspect_ratio: 4.0
   min_confidence: 0.3
   max_width_ratio: 0.85
@@ -55,6 +55,7 @@ analysis:
   dpi: 200
   image_size: 1000
   page_plan_enabled: true
+  batch_size: 20
   workers: 6
   # Optional override. Defaults to 'workers' count if page_plan_enabled is true, otherwise 1.
   qp_workers:

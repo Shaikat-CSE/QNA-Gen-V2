@@ -35,6 +35,64 @@ from .utils import (
 LOGGER = logging.getLogger(__name__)
 
 
+def print_pipeline_banner(config: dict[str, Any], args: Any) -> None:
+    import sys
+    import os
+    use_color = (
+        not os.environ.get("NO_COLOR")
+        and os.environ.get("TERM") != "dumb"
+        and sys.stdout.isatty()
+    )
+    def c(code: str, text: str) -> str:
+        return f"\033[{code}m{text}\033[0m" if use_color else text
+
+    banner_lines = [
+        " ██████╗ ███╗   ██╗ █████╗      ██████╗ ███████╗███╗   ██╗",
+        "██╔═══██╗████╗  ██║██╔══██╗    ██╔════╝ ██╔════╝████╗  ██║",
+        "██║   ██║██╔██╗ ██║███████║    ██║  ███╗█████╗  ██╔██╗ ██║",
+        "██║▄▄ ██║██║╚██╗██║██╔══██║    ██║   ██║██╔══╝  ██║╚██╗██║",
+        "╚██████╔╝██║ ╚████║██║  ██║    ╚██████╔╝███████╗██║ ╚████║",
+        " ╚══▀▀═╝ ╚═╝  ╚═══╝╚═╝  ╚═╝     ╚═════╝ ╚══════╝╚═╝  ╚═══╝",
+    ]
+    
+    print()
+    try:
+        for line in banner_lines:
+            print(f"  {c('38;5;214', line)}")
+        print(f"  {c('1;37', '═══ Exam Diagram Extraction & Q&A Workbook Generator ═══')}")
+    except UnicodeEncodeError:
+        ascii_banner = [
+            "=========================================================",
+            "  __  _  _   __      ___  ___  _  _ ",
+            " /  \ |\ |  /  \\    /  _  |__  |\\ | ",
+            " \\__\\ | \\| /____\\\\   \\\\____ |___ | \\| ",
+            "=========================================================",
+        ]
+        for line in ascii_banner:
+            print(f"  {c('38;5;214', line)}")
+        print(f"  {c('1;37', '--- Exam Diagram Extraction & Q&A Workbook Generator ---')}")
+    print()
+
+    def row(label: str, val: str) -> None:
+        print(f"  {c('36', label.ljust(22))} : {c('0', val)}")
+
+    row("Configuration", str(args.config))
+    row("Mode", "AUTO (Incremental batch processing)" if getattr(args, "auto", False) else "STANDARD (Single run)")
+    row("Input Path", str(config.get("input_dir")))
+    row("Output Path", str(config.get("output_dir")))
+    row("Batch Size", str((config.get("analysis") or {}).get("batch_size", 1)))
+    row("Analysis Backend", str((config.get("analysis") or {}).get("mode", "auto")).upper())
+    row("LLM Model", str(((config.get("analysis") or {}).get("llm") or {}).get("model") or "Not configured"))
+    row("Device", str((config.get("detection") or {}).get("device", "cpu")).upper())
+    row("DPI", f"Render: {config.get('render', {}).get('dpi')} DPI | Analysis: {config.get('analysis', {}).get('dpi')} DPI")
+    
+    try:
+        print(f"  {c('1;37', '═════════════════════════════════════════════════════════')}")
+    except UnicodeEncodeError:
+        print(f"  {c('1;37', '---------------------------------------------------------')}")
+    print()
+
+
 def main() -> int:
     args = parse_args()
     setup_logging(args.verbose)
@@ -43,6 +101,7 @@ def main() -> int:
     base_dir = config_path.parent
     config = load_config(config_path)
     apply_cli_overrides(config, args)
+    print_pipeline_banner(config, args)
 
     input_path = resolve_path(config["input_dir"], base_dir)
     output_root = ensure_dir(resolve_path(config["output_dir"], base_dir))
@@ -52,6 +111,108 @@ def main() -> int:
     if not pdfs:
         LOGGER.warning("No PDFs found in %s", input_path)
         write_json(output_root / "metadata.json", {"count": 0, "diagrams": [], "errors": []})
+        return 0
+
+    if getattr(args, "auto", False):
+        from .question_analysis import find_unprocessed_pairs
+        from .html_builder import infer_names_from_path
+        import json
+        from copy import deepcopy
+
+        assets_root = ensure_dir(output_root / "assets")
+        unprocessed = find_unprocessed_pairs(pdfs, input_path, output_root, base_dir)
+        if not unprocessed:
+            LOGGER.info("All paper pairs are already processed.")
+            return 0
+
+        LOGGER.info("Found %s unprocessed paper pair(s). Starting auto mode...", len(unprocessed))
+
+        detector = DocLayoutFigureDetector(
+            model_path=model_path,
+            auto_download=bool(config["model"]["auto_download"]),
+            repo_id=str(config["model"]["repo_id"]),
+            filename=str(config["model"]["filename"]),
+            image_size=int(config["detection"]["image_size"]),
+            confidence=float(config["detection"]["confidence"]),
+            iou=float(config["detection"]["iou"]) if config["detection"].get("iou") is not None else None,
+            device=str(config["detection"]["device"]),
+            figure_labels=list(config["detection"]["figure_labels"]),
+        )
+
+        ocr_extractor = None
+        if config["ocr"].get("enabled", False):
+            ocr_extractor = PaddleTextExtractor(
+                language=str(config["ocr"].get("language", "en")),
+                min_confidence=float(config["ocr"].get("min_confidence", 0.5)),
+            )
+
+        all_diagrams: list[dict[str, Any]] = []
+        all_errors: list[dict[str, Any]] = []
+        metadata_path = assets_root / "metadata.json"
+
+        if metadata_path.exists():
+            try:
+                with metadata_path.open("r", encoding="utf-8") as file:
+                    existing_meta = json.load(file)
+                all_diagrams.extend(existing_meta.get("diagrams", []))
+                all_errors.extend(existing_meta.get("errors", []))
+            except Exception:
+                pass
+
+        input_root = input_path if input_path.is_dir() else input_path.parent
+
+        for pair in unprocessed:
+            LOGGER.info("Auto-processing pair: %s", pair.question_pdf.name)
+            try:
+                pair_config = deepcopy(config)
+                pair_config["analysis"]["enabled"] = True
+                pair_config["analysis"]["mode"] = "llm"
+                pair_config["analysis"].setdefault("llm", {})["enabled"] = True
+                pair_config["analysis"]["cleanup_with_llm"] = True
+                pair_config["analysis"]["qp_pdf"] = str(pair.question_pdf)
+                pair_config["analysis"]["ms_pdf"] = str(pair.mark_scheme_pdf) if pair.mark_scheme_pdf else None
+                pair_config["html"]["enabled"] = True
+                
+                subject, year, paper_key = infer_names_from_path(pair.question_pdf)
+                pair_config["html"]["subject"] = subject
+                pair_config["html"]["year"] = year
+                pair_config["html"]["paper_key"] = paper_key
+
+                all_diagrams = [d for d in all_diagrams if d.get("pdf") != pair.question_pdf.name]
+
+                qp_diagrams, qp_errors = process_pdf(pair.question_pdf, input_root, assets_root, pair_config, detector, ocr_extractor)
+                all_diagrams.extend(qp_diagrams)
+                all_errors.extend(qp_errors)
+
+                write_json(
+                    metadata_path,
+                    {
+                        "count": len(all_diagrams),
+                        "diagrams": all_diagrams,
+                        "errors": all_errors,
+                    },
+                )
+
+                qna_json_path = maybe_analyze_questions([pair.question_pdf], input_root, assets_root, metadata_path, pair_config, base_dir)
+                if qna_json_path is not None:
+                    pair_config["html"]["qna_json"] = str(qna_json_path)
+
+                maybe_build_html(pair_config, base_dir, output_root, [pair.question_pdf], input_root)
+                LOGGER.info("Completed auto-processing for: %s", pair.question_pdf.name)
+
+            except Exception as exc:
+                LOGGER.exception("Failed to auto-process pair %s", pair.question_pdf.name)
+                all_errors.append({"pdf": str(pair.question_pdf), "error": str(exc)})
+                write_json(
+                    metadata_path,
+                    {
+                        "count": len(all_diagrams),
+                        "diagrams": all_diagrams,
+                        "errors": all_errors,
+                    },
+                )
+
+        LOGGER.info("Auto-processing of all unprocessed papers finished.")
         return 0
 
     detector = DocLayoutFigureDetector(
@@ -530,9 +691,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--paper-key", help="Paper key label for generated HTML")
     parser.add_argument("--html-group-by-parent", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--html-copy-images", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--auto", action="store_true", help="Auto-detect and process all unprocessed QP/MS pairs")
     parser.add_argument("--verbose", action="store_true")
     return parser.parse_args()
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except KeyboardInterrupt:
+        print("\n\nExecution cancelled by user.")
+        sys.exit(130)
