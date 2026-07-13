@@ -1,5 +1,14 @@
 from __future__ import annotations
 
+# Set environment variables to restrict internal PyTorch/OpenMP thread pools to 1 thread.
+# This prevents extreme CPU thread contention when executing YOLOv10 inference in parallel threads on CPU.
+import os
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
+
 import argparse
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed

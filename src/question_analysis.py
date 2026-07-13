@@ -188,6 +188,7 @@ def analyze_question_pdf(
         dpi=dpi,
         page_start=config.get("page_start"),
         page_end=config.get("page_end"),
+        target_size=(image_size, image_size) if image_size > 0 else None,
     ))
     rendered_pages = normalize_rendered_pages_to_square(rendered_pages, image_size)
     page_plans = (
@@ -260,8 +261,11 @@ def normalize_rendered_pages_to_square(rendered_pages: list[Any], image_size: in
 
     normalized_pages = []
     for rendered_page in rendered_pages:
-        normalize_page_image_to_square(rendered_page.image_path, image_size)
-        normalized_pages.append(replace(rendered_page, width=image_size, height=image_size))
+        if rendered_page.width != image_size or rendered_page.height != image_size:
+            normalize_page_image_to_square(rendered_page.image_path, image_size)
+            normalized_pages.append(replace(rendered_page, width=image_size, height=image_size))
+        else:
+            normalized_pages.append(rendered_page)
     return normalized_pages
 
 
@@ -287,42 +291,54 @@ def plan_question_pages(
     llm_client: "OpenAICompatibleVisionClient",
     workers: int = 1,
 ) -> dict[int, dict[str, Any]]:
-    raw_plans: dict[int, dict[str, Any]] = {}
+    # Try batched sequence planning first
+    try:
+        LOGGER.info("Attempting batched sequence planning for %s pages...", len(rendered_pages))
+        image_paths = [rp.image_path for rp in rendered_pages]
+        page_numbers = [rp.page_number for rp in rendered_pages]
+        raw_plans = llm_client.analyze_question_pages_plan(image_paths, page_numbers)
+    except Exception as exc:
+        LOGGER.warning("Batched sequence planning failed: %s. Falling back to page-by-page planning.", exc)
+        raw_plans = {}
 
-    def plan_single_page(rendered_page: Any) -> tuple[int, dict[str, Any]]:
-        plan = llm_client.analyze_question_page_plan(
-            rendered_page.image_path,
-            rendered_page.page_number,
-            "previous_active",
-        )
-        return rendered_page.page_number, plan
+    # If some pages are missing from the batched response, fetch them individually
+    missing_pages = [rp for rp in rendered_pages if rp.page_number not in raw_plans]
+    if missing_pages:
+        LOGGER.info("Fetching plans for %s missing pages individually...", len(missing_pages))
+        def plan_single_page(rendered_page: Any) -> tuple[int, dict[str, Any]]:
+            plan = llm_client.analyze_question_page_plan(
+                rendered_page.image_path,
+                rendered_page.page_number,
+                "previous_active",
+            )
+            return rendered_page.page_number, plan
 
-    with ProgressBar("Plan QP sequence", len(rendered_pages)) as progress:
-        if workers <= 1:
-            for rendered_page in rendered_pages:
-                try:
-                    page_number, plan = plan_single_page(rendered_page)
-                    raw_plans[page_number] = plan
-                except Exception as exc:
-                    LOGGER.warning("QP page planning failed for page %s: %s", rendered_page.page_number, exc)
-                finally:
-                    progress.update()
-        else:
-            LOGGER.info("Planning QP sequence with %s worker(s)", workers)
-            with ThreadPoolExecutor(max_workers=workers) as executor:
-                futures = {
-                    executor.submit(plan_single_page, rendered_page): rendered_page
-                    for rendered_page in rendered_pages
-                }
-                for future in as_completed(futures):
-                    rendered_page = futures[future]
+        with ProgressBar("Plan QP sequence", len(missing_pages)) as progress:
+            if workers <= 1 or len(missing_pages) == 1:
+                for rendered_page in missing_pages:
                     try:
-                        page_number, plan = future.result()
+                        page_number, plan = plan_single_page(rendered_page)
                         raw_plans[page_number] = plan
                     except Exception as exc:
                         LOGGER.warning("QP page planning failed for page %s: %s", rendered_page.page_number, exc)
                     finally:
                         progress.update()
+            else:
+                LOGGER.info("Planning remaining QP sequence with %s worker(s)", workers)
+                with ThreadPoolExecutor(max_workers=workers) as executor:
+                    futures = {
+                        executor.submit(plan_single_page, rendered_page): rendered_page
+                        for rendered_page in missing_pages
+                    }
+                    for future in as_completed(futures):
+                        rendered_page = futures[future]
+                        try:
+                            page_number, plan = future.result()
+                            raw_plans[page_number] = plan
+                        except Exception as exc:
+                            LOGGER.warning("QP page planning failed for page %s: %s", rendered_page.page_number, exc)
+                        finally:
+                            progress.update()
 
     page_plans: dict[int, dict[str, Any]] = {}
     active_question = "1"
@@ -509,6 +525,7 @@ def analyze_mark_scheme_pdf(
         dpi=dpi,
         page_start=config.get("ms_page_start"),
         page_end=config.get("ms_page_end"),
+        target_size=(image_size, image_size) if image_size > 0 else None,
     ))
     rendered_pages = normalize_rendered_pages_to_square(rendered_pages, image_size)
 
@@ -771,6 +788,144 @@ Fragment:
 """
         return self._text_request(prompt, cache_prefix="clean_a")
 
+    def clean_qna_html(self, question_html: str, answer_html: str) -> tuple[str, str]:
+        if not question_html.strip() and not answer_html.strip():
+            return "", ""
+
+        prompt = f"""You are cleaning an exam question and its corresponding answer/mark scheme HTML fragment.
+
+Return only valid JSON. Do not include markdown fences.
+
+Question Rules:
+- Preserve existing HTML tags, image tags, diagram wrappers, and LaTeX exactly.
+- Remove OCR noise, repeated blank lines, dotted answer lines, underscores, page numbers, and irrelevant headers.
+- Convert markdown-style tables to valid HTML tables.
+
+Answer Rules:
+- Preserve existing section wrappers and useful HTML tags.
+- Keep only actual marking points, accepted answers, equations, and essential guidance.
+- Remove generic boilerplate and wrong-option explanations that do not help answer the question.
+- Convert literal newline markers into <br> only where needed.
+
+Required JSON shape:
+{{
+  "cleaned_question": "...",
+  "cleaned_answer": "..."
+}}
+
+Question Fragment to Clean:
+{question_html}
+
+Answer Fragment to Clean:
+{answer_html}
+"""
+        cache_key = self._cache_key(prompt, None)
+        cached = self._read_cache(cache_key)
+        if isinstance(cached, dict) and "cleaned_question" in cached and "cleaned_answer" in cached:
+            return str(cached["cleaned_question"]), str(cached["cleaned_answer"])
+
+        response_text = self._request_with_retries([{"role": "user", "content": prompt}]).strip()
+        response_text = strip_markdown_fence(response_text)
+        try:
+            parsed = parse_json_response(response_text)
+        except Exception:
+            parsed = {}
+
+        cleaned_q = parsed.get("cleaned_question", question_html)
+        cleaned_a = parsed.get("cleaned_answer", answer_html)
+
+        cleaned_q = str(cleaned_q) if cleaned_q is not None else ""
+        cleaned_a = str(cleaned_a) if cleaned_a is not None else ""
+
+        self._write_cache(
+            cache_key,
+            {"cleaned_question": cleaned_q, "cleaned_answer": cleaned_a},
+            "clean_qna"
+        )
+        return cleaned_q, cleaned_a
+
+    def analyze_question_pages_plan(
+        self,
+        image_paths: list[Path],
+        page_numbers: list[int],
+    ) -> dict[int, dict[str, Any]]:
+        if not image_paths:
+            return {}
+
+        prompt = f"""You are planning the sequence of an exam question paper before detailed extraction.
+
+Return only valid JSON. Do not include markdown fences.
+
+You are given a sequence of {len(image_paths)} page images in reading order.
+For each page, identify the active parent label and all visible question/sub-question labels.
+
+Task:
+1. Identify the active parent label for each page. If the page continues from a previous page and only labels like (i), (ii), (b), or (c)(i) are visible, attach them to the most specific likely parent.
+2. List all visible question/sub-question labels in reading order for each page.
+3. Preserve labels exactly in normalized form such as "4", "4(a)", "4(b)(ii)".
+4. If uncertain, use the most likely parent from the surrounding page contexts.
+
+Required JSON shape:
+{{
+  "plans": [
+    {{
+      "page_number": 1,
+      "active_parent_question": "1",
+      "visible_question_numbers": ["1(a)", "1(b)"],
+      "continues_previous_question": false,
+      "notes": "starts question 1"
+    }},
+    ...
+  ]
+}}
+"""
+        payload = self._multi_image_json_request(
+            image_paths,
+            prompt,
+            cache_prefix=f"qp_plan_batch_p{page_numbers[0]}_to_p{page_numbers[-1]}",
+        )
+        plans_list = payload.get("plans", []) if isinstance(payload, dict) else []
+        plans_dict: dict[int, dict[str, Any]] = {}
+        for item in plans_list if isinstance(plans_list, list) else []:
+            if isinstance(item, dict) and "page_number" in item:
+                try:
+                    p_num = int(item["page_number"])
+                    plans_dict[p_num] = item
+                except (ValueError, TypeError):
+                    pass
+        return plans_dict
+
+    def _multi_image_json_request(self, image_paths: list[Path], prompt: str, cache_prefix: str) -> dict[str, Any]:
+        hasher = hashlib.sha256()
+        hasher.update(self.model.encode("utf-8"))
+        hasher.update(prompt.encode("utf-8"))
+        for path in image_paths:
+            hasher.update(path.read_bytes())
+        cache_key = hasher.hexdigest()
+
+        cached = self._read_cache(cache_key)
+        if isinstance(cached, dict):
+            return cached
+
+        content_list: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+        for path in image_paths:
+            encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+            content_list.append(
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{encoded}"}}
+            )
+
+        response_text = self._request_with_retries(
+            [
+                {
+                    "role": "user",
+                    "content": content_list,
+                }
+            ]
+        )
+        parsed = parse_json_response(response_text)
+        self._write_cache(cache_key, parsed, cache_prefix)
+        return parsed
+
     def _image_json_request(self, image_path: Path, prompt: str, cache_prefix: str) -> dict[str, Any]:
         cache_key = self._cache_key(prompt, image_path)
         cached = self._read_cache(cache_key)
@@ -922,15 +1077,14 @@ def cleanup_single_qna_with_llm(qna: dict[str, Any], llm_client: OpenAICompatibl
     item = dict(qna)
     try:
         text = str(item.get("text", "")).strip()
-        if text:
-            item["text"] = llm_client.clean_question_html(text)
+        answer_text = str(item.get("answer_text", "")).strip()
+
+        if text or answer_text:
+            cleaned_q, cleaned_a = llm_client.clean_qna_html(text, answer_text)
+            item["text"] = cleaned_q
+            item["answer_text"] = cleaned_a
         else:
             item["text"] = ""
-
-        answer_text = str(item.get("answer_text", "")).strip()
-        if answer_text:
-            item["answer_text"] = llm_client.clean_answer_html(answer_text)
-        else:
             item["answer_text"] = ""
     except Exception as exc:
         LOGGER.warning("LLM cleanup failed for question %s: %s", item.get("question_number"), exc)
