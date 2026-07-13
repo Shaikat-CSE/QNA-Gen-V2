@@ -396,6 +396,7 @@ def stage_associated_images(
 
     text_html = str(qna.get("text_html") or "")
     staged_sources: list[str] = []
+    unreferenced_figures: list[str] = []
 
     import base64
     import mimetypes
@@ -418,9 +419,12 @@ def stage_associated_images(
 
         text_html = replace_image_references(text_html, image_value, source_image, base64_src)
         if not html_references_image(text_html, base64_src, image_value):
-            text_html += "\n" + figure_html(base64_src, Path(image_value).name)
+            unreferenced_figures.append(figure_html(base64_src, Path(image_value).name))
 
         staged_sources.append(base64_src)
+
+    if unreferenced_figures:
+        text_html = "\n".join(unreferenced_figures) + "\n" + text_html
 
     text_html = remove_figure_captions(text_html)
     qna["text_html"] = text_html
