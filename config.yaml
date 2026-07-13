@@ -30,7 +30,7 @@ crop:
 quality:
   enabled: true
   min_width: 64
-  min_height: 400
+  min_height: 100
   min_area: 4096
   max_blank_ratio: 0.97
   max_aspect_ratio: 4.0
