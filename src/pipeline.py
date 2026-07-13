@@ -519,6 +519,8 @@ def apply_cli_overrides(config: dict[str, Any], args: argparse.Namespace) -> Non
         analysis_config["keep_pages"] = args.keep_analysis_pages
     if args.cleanup_with_llm is not None:
         analysis_config["cleanup_with_llm"] = args.cleanup_with_llm
+    if getattr(args, "batch_size", None) is not None:
+        analysis_config["batch_size"] = args.batch_size
     if args.analysis_page_start is not None:
         analysis_config["page_start"] = args.analysis_page_start
     if args.analysis_page_end is not None:
@@ -673,6 +675,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--qp-workers", type=int, help="Question-paper page workers; keep at 1 for best numbering")
     parser.add_argument("--ms-workers", type=int, help="Mark-scheme page workers")
     parser.add_argument("--cleanup-workers", type=int, help="Parallel workers for optional LLM cleanup")
+    parser.add_argument("--batch-size", type=int, help="Page chunk size for batch analysis requests")
     parser.add_argument("--keep-analysis-pages", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--cleanup-with-llm", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--analysis-page-start", type=int, help="First QP page to analyze")

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -8,6 +9,8 @@ import cv2
 import numpy as np
 
 from .utils import ensure_dir
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass
@@ -71,6 +74,48 @@ def save_crop(crop: CropResult, output_path: Path) -> None:
         raise RuntimeError(f"Could not save crop: {output_path}")
 
 
+def is_dotted_writing_space(image: Any, threshold: int = 240) -> bool:
+    if image is None or image.size == 0:
+        return False
+
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    binary = (gray < threshold).astype(np.uint8)
+
+    height, width = binary.shape
+    if width < 50 or height < 20:
+        return False
+
+    row_sums = np.sum(binary, axis=1)
+    # Active rows contain at least 3 foreground pixels
+    active_rows = np.where(row_sums >= 3)[0]
+    if len(active_rows) == 0:
+        return False
+
+    dotted_line_count = 0
+    for y in active_rows:
+        row_pixels = np.where(binary[y] == 1)[0]
+        if len(row_pixels) >= 2:
+            span = row_pixels[-1] - row_pixels[0]
+            # If the dots span at least 75% of the total crop width
+            if span > 0.75 * width:
+                dotted_line_count += 1
+
+    col_sums = np.sum(binary, axis=0)
+    max_col_sum = np.max(col_sums)
+
+    # Dotted writing spaces have no prominent vertical lines
+    has_vertical_line = max_col_sum > 0.35 * height
+
+    # If the majority of active rows are horizontal spans and there is no vertical line,
+    # it is a dotted answer space.
+    if not has_vertical_line:
+        span_ratio = dotted_line_count / len(active_rows)
+        if span_ratio > 0.75:
+            return True
+
+    return False
+
+
 def passes_quality(
     crop: CropResult,
     quality_config: dict[str, object],
@@ -80,6 +125,15 @@ def passes_quality(
 ) -> bool:
     if not quality_config.get("enabled", False):
         return True
+
+    # Filter out dotted answer spaces
+    if is_dotted_writing_space(crop.image):
+        LOGGER.info(
+            "Rejecting crop: detected as dotted writing space (dimensions: %dx%d)",
+            crop.width,
+            crop.height,
+        )
+        return False
 
     # Reject if both width and height coverage ratios exceed the max page ratios (e.g. 85%),
     # indicating a full page grid or dotted writing space false positive.
