@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
@@ -110,34 +111,67 @@ def process_pdf(
     pdf_output_dir = ensure_dir(make_pdf_output_dir(pdf_path, input_root, output_root))
     pages_dir = ensure_dir(pdf_output_dir / "pages")
     keep_pages = bool(config["render"].get("keep_rendered_pages", False))
+    workers = normalize_worker_count(config["render"].get("workers"), default=1)
     diagrams: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
 
-    for rendered_page in render_pdf(
+    rendered_pages = render_pdf(
         pdf_path,
         pages_dir,
         dpi=int(config["render"]["dpi"]),
         page_start=config.get("page_start"),
         page_end=config.get("page_end"),
-    ):
-        try:
-            page_diagrams = process_page(
-                rendered_page,
-                pdf_output_dir,
-                pdf_path,
-                input_root,
-                output_root,
-                config,
-                detector,
-                ocr_extractor,
-            )
-            diagrams.extend(page_diagrams)
-        except Exception as exc:
-            LOGGER.exception("Failed page %s of %s", rendered_page.page_number, pdf_path)
-            errors.append({"pdf": str(pdf_path), "page": rendered_page.page_number, "error": str(exc)})
-        finally:
-            if not keep_pages:
-                rendered_page.image_path.unlink(missing_ok=True)
+    )
+
+    if workers <= 1:
+        for rendered_page in rendered_pages:
+            try:
+                page_diagrams = process_page(
+                    rendered_page,
+                    pdf_output_dir,
+                    pdf_path,
+                    input_root,
+                    output_root,
+                    config,
+                    detector,
+                    ocr_extractor,
+                )
+                diagrams.extend(page_diagrams)
+            except Exception as exc:
+                LOGGER.exception("Failed page %s of %s", rendered_page.page_number, pdf_path)
+                errors.append({"pdf": str(pdf_path), "page": rendered_page.page_number, "error": str(exc)})
+            finally:
+                if not keep_pages:
+                    rendered_page.image_path.unlink(missing_ok=True)
+    else:
+        LOGGER.info("Processing %s with %s page worker(s)", pdf_path, workers)
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {
+                executor.submit(
+                    process_page,
+                    rendered_page,
+                    pdf_output_dir,
+                    pdf_path,
+                    input_root,
+                    output_root,
+                    config,
+                    detector,
+                    ocr_extractor,
+                ): rendered_page
+                for rendered_page in rendered_pages
+            }
+            for future in as_completed(futures):
+                rendered_page = futures[future]
+                try:
+                    diagrams.extend(future.result())
+                except Exception as exc:
+                    LOGGER.exception("Failed page %s of %s", rendered_page.page_number, pdf_path)
+                    errors.append({"pdf": str(pdf_path), "page": rendered_page.page_number, "error": str(exc)})
+                finally:
+                    if not keep_pages:
+                        rendered_page.image_path.unlink(missing_ok=True)
+
+    diagrams.sort(key=lambda item: (int(item.get("page") or 0), int(item.get("figure") or 0)))
 
     if not keep_pages:
         try:
@@ -261,6 +295,8 @@ def apply_cli_overrides(config: dict[str, Any], args: argparse.Namespace) -> Non
         config["detection"]["device"] = args.device
     if args.dpi is not None:
         config["render"]["dpi"] = args.dpi
+    if args.workers is not None:
+        config["render"]["workers"] = args.workers
     if args.confidence is not None:
         config["detection"]["confidence"] = args.confidence
     if args.image_size is not None:
@@ -288,6 +324,10 @@ def apply_cli_overrides(config: dict[str, Any], args: argparse.Namespace) -> Non
         analysis_config["output_json"] = args.analysis_output
     if args.analysis_dpi is not None:
         analysis_config["dpi"] = args.analysis_dpi
+    if args.analysis_workers is not None:
+        analysis_config["workers"] = args.analysis_workers
+    if args.cleanup_workers is not None:
+        analysis_config["cleanup_workers"] = args.cleanup_workers
     if args.keep_analysis_pages is not None:
         analysis_config["keep_pages"] = args.keep_analysis_pages
     if args.cleanup_with_llm is not None:
@@ -408,6 +448,14 @@ def optional_str(value: Any) -> str | None:
     return str(value) if value not in (None, "") else None
 
 
+def normalize_worker_count(value: Any, default: int = 1) -> int:
+    try:
+        workers = int(value)
+    except (TypeError, ValueError):
+        workers = default
+    return max(1, workers)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Extract diagram crops from educational PDFs.")
     parser.add_argument("--config", default="config.yaml", help="Path to config.yaml")
@@ -416,6 +464,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", help="Path to DocLayout-YOLO .pt model")
     parser.add_argument("--device", help="Inference device, e.g. cpu or cuda:0")
     parser.add_argument("--dpi", type=int, help="PDF render DPI")
+    parser.add_argument("--workers", type=int, help="Parallel page workers for diagram extraction")
     parser.add_argument("--confidence", type=float, help="Detection confidence threshold")
     parser.add_argument("--image-size", type=int, help="DocLayout-YOLO inference image size")
     parser.add_argument("--iou", type=float, help="Detection IoU threshold")
@@ -431,6 +480,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ms-pdf", help="Mark scheme PDF for analysis")
     parser.add_argument("--analysis-output", help="Path for extracted_qna.json")
     parser.add_argument("--analysis-dpi", type=int, help="DPI for analysis page images")
+    parser.add_argument("--analysis-workers", type=int, help="Parallel workers for analysis page LLM/OCR calls")
+    parser.add_argument("--cleanup-workers", type=int, help="Parallel workers for optional LLM cleanup")
     parser.add_argument("--keep-analysis-pages", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--cleanup-with-llm", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--analysis-page-start", type=int, help="First QP page to analyze")

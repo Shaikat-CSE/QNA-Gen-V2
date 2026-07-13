@@ -7,7 +7,9 @@ import json
 import logging
 import os
 import re
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -82,6 +84,11 @@ def analyze_exam_pair(
     mode = str(analysis_config.get("mode", "auto")).lower()
     dpi = int(analysis_config.get("dpi", 200))
     keep_pages = bool(analysis_config.get("keep_pages", False))
+    workers = normalize_worker_count(analysis_config.get("workers"), default=1)
+    cleanup_workers = normalize_worker_count(
+        analysis_config.get("cleanup_workers"),
+        default=workers,
+    )
 
     llm_client = make_llm_client(analysis_config, base_dir)
     ocr_engine = make_page_ocr(analysis_config)
@@ -97,6 +104,7 @@ def analyze_exam_pair(
         llm_client=llm_client,
         ocr_engine=ocr_engine,
         config=analysis_config,
+        workers=workers,
     )
 
     answers: list[dict[str, Any]] = []
@@ -111,6 +119,7 @@ def analyze_exam_pair(
             llm_client=llm_client,
             ocr_engine=ocr_engine,
             config=analysis_config,
+            workers=workers,
         )
     else:
         LOGGER.warning("No mark scheme PDF available for %s", pair.question_pdf.name)
@@ -119,7 +128,7 @@ def analyze_exam_pair(
     qnas = match_questions_to_answers(questions, answers)
 
     if llm_client and bool(analysis_config.get("cleanup_with_llm", True)):
-        qnas = cleanup_qnas_with_llm(qnas, llm_client)
+        qnas = cleanup_qnas_with_llm(qnas, llm_client, workers=cleanup_workers)
 
     payload = {
         "source": {
@@ -153,50 +162,30 @@ def analyze_question_pdf(
     llm_client: "OpenAICompatibleVisionClient | None",
     ocr_engine: "PageOCREngine | None",
     config: dict[str, Any],
+    workers: int = 1,
 ) -> list[dict[str, Any]]:
     pages_dir = ensure_dir(output_dir / "qp_pages")
     questions: list[dict[str, Any]] = []
     active_question = "1"
-
-    for rendered_page in render_pdf(
+    rendered_pages = render_pdf(
         pdf_path,
         pages_dir,
         dpi=dpi,
         page_start=config.get("page_start"),
         page_end=config.get("page_end"),
-    ):
-        backend = choose_backend(mode, llm_client, ocr_engine)
-        page_diagrams = diagrams_by_page.get(rendered_page.page_number, [])
+    )
 
-        try:
-            if backend == "llm" and llm_client is not None:
-                page_questions = llm_client.analyze_question_page(
-                    rendered_page.image_path,
-                    rendered_page.page_number,
-                    active_question,
-                    page_diagrams,
-                )
-            elif backend == "ocr" and ocr_engine is not None:
-                ocr_lines = ocr_engine.extract_lines(rendered_page.image_path)
-                page_questions = heuristic_questions_from_lines(
-                    ocr_lines,
-                    rendered_page.page_number,
-                    page_diagrams,
-                    source="ocr",
-                )
-            else:
-                page_questions = []
-
-            normalized = [
-                normalize_question_block(question, rendered_page.page_number, page_diagrams)
-                for question in page_questions
-            ]
-            for question in normalized:
-                q_num = str(question.get("question_number", ""))
-                match = re.match(r"^(\d+)", q_num)
-                if match:
-                    active_question = match.group(1)
-            normalized = fix_orphan_subparts(normalized, active_question)
+    if workers <= 1:
+        for rendered_page in rendered_pages:
+            normalized, active_question, backend = analyze_question_page_render(
+                rendered_page,
+                diagrams_by_page,
+                mode,
+                llm_client,
+                ocr_engine,
+                active_question,
+                keep_pages,
+            )
             questions.extend(normalized)
             LOGGER.info(
                 "QP page %s analyzed with %s backend: %s question block(s)",
@@ -204,14 +193,85 @@ def analyze_question_pdf(
                 backend,
                 len(normalized),
             )
-        finally:
-            if not keep_pages:
-                rendered_page.image_path.unlink(missing_ok=True)
+    else:
+        LOGGER.info("Analyzing QP pages with %s worker(s)", workers)
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {
+                executor.submit(
+                    analyze_question_page_render,
+                    rendered_page,
+                    diagrams_by_page,
+                    mode,
+                    llm_client,
+                    ocr_engine,
+                    "unknown",
+                    keep_pages,
+                ): rendered_page
+                for rendered_page in rendered_pages
+            }
+            for future in as_completed(futures):
+                rendered_page = futures[future]
+                normalized, _active_question, backend = future.result()
+                questions.extend(normalized)
+                LOGGER.info(
+                    "QP page %s analyzed with %s backend: %s question block(s)",
+                    rendered_page.page_number,
+                    backend,
+                    len(normalized),
+                )
 
     if not keep_pages:
         try_remove_dir(pages_dir)
 
     return sort_blocks(questions)
+
+
+def analyze_question_page_render(
+    rendered_page: Any,
+    diagrams_by_page: dict[int, list[dict[str, Any]]],
+    mode: str,
+    llm_client: "OpenAICompatibleVisionClient | None",
+    ocr_engine: "PageOCREngine | None",
+    active_question: str,
+    keep_pages: bool,
+) -> tuple[list[dict[str, Any]], str, str]:
+    backend = choose_backend(mode, llm_client, ocr_engine)
+    page_diagrams = diagrams_by_page.get(rendered_page.page_number, [])
+
+    try:
+        if backend == "llm" and llm_client is not None:
+            page_questions = llm_client.analyze_question_page(
+                rendered_page.image_path,
+                rendered_page.page_number,
+                active_question,
+                page_diagrams,
+            )
+        elif backend == "ocr" and ocr_engine is not None:
+            ocr_lines = ocr_engine.extract_lines(rendered_page.image_path)
+            page_questions = heuristic_questions_from_lines(
+                ocr_lines,
+                rendered_page.page_number,
+                page_diagrams,
+                source="ocr",
+            )
+        else:
+            page_questions = []
+
+        normalized = [
+            normalize_question_block(question, rendered_page.page_number, page_diagrams)
+            for question in page_questions
+        ]
+        next_active_question = active_question
+        for question in normalized:
+            q_num = str(question.get("question_number", ""))
+            match = re.match(r"^(\d+)", q_num)
+            if match:
+                next_active_question = match.group(1)
+        normalized = fix_orphan_subparts(normalized, next_active_question)
+        return normalized, next_active_question, backend
+    finally:
+        if not keep_pages:
+            rendered_page.image_path.unlink(missing_ok=True)
 
 
 def analyze_mark_scheme_pdf(
@@ -223,29 +283,27 @@ def analyze_mark_scheme_pdf(
     llm_client: "OpenAICompatibleVisionClient | None",
     ocr_engine: "PageOCREngine | None",
     config: dict[str, Any],
+    workers: int = 1,
 ) -> list[dict[str, Any]]:
     pages_dir = ensure_dir(output_dir / "ms_pages")
     answers: list[dict[str, Any]] = []
-
-    for rendered_page in render_pdf(
+    rendered_pages = render_pdf(
         pdf_path,
         pages_dir,
         dpi=dpi,
         page_start=config.get("ms_page_start"),
         page_end=config.get("ms_page_end"),
-    ):
-        backend = choose_backend(mode, llm_client, ocr_engine)
+    )
 
-        try:
-            if backend == "llm" and llm_client is not None:
-                page_answers = llm_client.analyze_mark_scheme_page(rendered_page.image_path, rendered_page.page_number)
-            elif backend == "ocr" and ocr_engine is not None:
-                ocr_lines = ocr_engine.extract_lines(rendered_page.image_path)
-                page_answers = heuristic_answers_from_lines(ocr_lines, rendered_page.page_number, source="ocr")
-            else:
-                page_answers = []
-
-            normalized = [normalize_answer_block(answer, rendered_page.page_number) for answer in page_answers]
+    if workers <= 1:
+        for rendered_page in rendered_pages:
+            normalized, backend = analyze_mark_scheme_page_render(
+                rendered_page,
+                mode,
+                llm_client,
+                ocr_engine,
+                keep_pages,
+            )
             answers.extend(normalized)
             LOGGER.info(
                 "MS page %s analyzed with %s backend: %s answer block(s)",
@@ -253,14 +311,60 @@ def analyze_mark_scheme_pdf(
                 backend,
                 len(normalized),
             )
-        finally:
-            if not keep_pages:
-                rendered_page.image_path.unlink(missing_ok=True)
+    else:
+        LOGGER.info("Analyzing MS pages with %s worker(s)", workers)
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {
+                executor.submit(
+                    analyze_mark_scheme_page_render,
+                    rendered_page,
+                    mode,
+                    llm_client,
+                    ocr_engine,
+                    keep_pages,
+                ): rendered_page
+                for rendered_page in rendered_pages
+            }
+            for future in as_completed(futures):
+                rendered_page = futures[future]
+                normalized, backend = future.result()
+                answers.extend(normalized)
+                LOGGER.info(
+                    "MS page %s analyzed with %s backend: %s answer block(s)",
+                    rendered_page.page_number,
+                    backend,
+                    len(normalized),
+                )
 
     if not keep_pages:
         try_remove_dir(pages_dir)
 
     return dedupe_answer_blocks(sort_blocks(answers))
+
+
+def analyze_mark_scheme_page_render(
+    rendered_page: Any,
+    mode: str,
+    llm_client: "OpenAICompatibleVisionClient | None",
+    ocr_engine: "PageOCREngine | None",
+    keep_pages: bool,
+) -> tuple[list[dict[str, Any]], str]:
+    backend = choose_backend(mode, llm_client, ocr_engine)
+
+    try:
+        if backend == "llm" and llm_client is not None:
+            page_answers = llm_client.analyze_mark_scheme_page(rendered_page.image_path, rendered_page.page_number)
+        elif backend == "ocr" and ocr_engine is not None:
+            ocr_lines = ocr_engine.extract_lines(rendered_page.image_path)
+            page_answers = heuristic_answers_from_lines(ocr_lines, rendered_page.page_number, source="ocr")
+        else:
+            page_answers = []
+
+        normalized = [normalize_answer_block(answer, rendered_page.page_number) for answer in page_answers]
+        return normalized, backend
+    finally:
+        if not keep_pages:
+            rendered_page.image_path.unlink(missing_ok=True)
 
 
 class OpenAICompatibleVisionClient:
@@ -282,6 +386,7 @@ class OpenAICompatibleVisionClient:
         self.temperature = temperature
         self.max_retries = max_retries
         self.cache_dir = ensure_dir(cache_dir)
+        self._cache_lock = threading.Lock()
         kwargs: dict[str, Any] = {"api_key": api_key}
         if base_url:
             kwargs["base_url"] = normalize_base_url(base_url)
@@ -309,7 +414,7 @@ Return only valid JSON. Do not include markdown fences.
 Task:
 1. Extract every real question/sub-question visible on this page in reading order.
 2. Preserve the question numbering exactly, e.g. "1", "1(a)", "1(b)(ii)".
-3. If a question continues from the previous page and the parent number is not shown, use parent "{active_question}".
+3. If a question continues from the previous page and the parent number is not shown, infer the parent from visible numbering/context. If it is impossible to infer, use parent "{active_question}".
 4. CRITICAL: Always extract the intro/context text that appears before the first sub-question as a separate question with the parent number only (e.g. "1", "2", "3"). This intro text often describes a diagram, experiment, or scenario. Do NOT merge it into the first sub-question.
 5. Clean the question text for HTML presentation: remove page headers/footers, page numbers, candidate instructions that are not part of a question, answer dotted lines, repeated underscores, and handwriting space.
 6. Preserve science/math notation using LaTeX delimiters \\( ... \\) or \\[ ... \\].
@@ -480,11 +585,12 @@ Fragment:
             return None
 
     def _write_cache(self, cache_key: str, payload: Any, cache_prefix: str) -> None:
-        path = self.cache_dir / f"{cache_key}.json"
-        write_json(path, payload)
-        index_path = self.cache_dir / f"{cache_prefix}_{cache_key[:12]}.json"
-        if not index_path.exists():
-            write_json(index_path, {"cache_key": cache_key})
+        with self._cache_lock:
+            path = self.cache_dir / f"{cache_key}.json"
+            write_json(path, payload)
+            index_path = self.cache_dir / f"{cache_prefix}_{cache_key[:12]}.json"
+            if not index_path.exists():
+                write_json(index_path, {"cache_key": cache_key})
 
 
 class PageOCREngine:
@@ -540,26 +646,37 @@ class PageOCREngine:
         return lines
 
 
-def cleanup_qnas_with_llm(qnas: list[dict[str, Any]], llm_client: OpenAICompatibleVisionClient) -> list[dict[str, Any]]:
-    cleaned: list[dict[str, Any]] = []
-    for qna in qnas:
-        item = dict(qna)
-        try:
-            text = str(item.get("text", "")).strip()
-            if text:
-                item["text"] = llm_client.clean_question_html(text)
-            else:
-                item["text"] = ""
+def cleanup_qnas_with_llm(
+    qnas: list[dict[str, Any]],
+    llm_client: OpenAICompatibleVisionClient,
+    workers: int = 1,
+) -> list[dict[str, Any]]:
+    workers = min(normalize_worker_count(workers), max(len(qnas), 1))
+    if workers > 1:
+        LOGGER.info("Cleaning QNA HTML with %s LLM worker(s)", workers)
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            return list(executor.map(lambda qna: cleanup_single_qna_with_llm(qna, llm_client), qnas))
 
-            answer_text = str(item.get("answer_text", "")).strip()
-            if answer_text:
-                item["answer_text"] = llm_client.clean_answer_html(answer_text)
-            else:
-                item["answer_text"] = ""
-        except Exception as exc:
-            LOGGER.warning("LLM cleanup failed for question %s: %s", item.get("question_number"), exc)
-        cleaned.append(item)
-    return cleaned
+    return [cleanup_single_qna_with_llm(qna, llm_client) for qna in qnas]
+
+
+def cleanup_single_qna_with_llm(qna: dict[str, Any], llm_client: OpenAICompatibleVisionClient) -> dict[str, Any]:
+    item = dict(qna)
+    try:
+        text = str(item.get("text", "")).strip()
+        if text:
+            item["text"] = llm_client.clean_question_html(text)
+        else:
+            item["text"] = ""
+
+        answer_text = str(item.get("answer_text", "")).strip()
+        if answer_text:
+            item["answer_text"] = llm_client.clean_answer_html(answer_text)
+        else:
+            item["answer_text"] = ""
+    except Exception as exc:
+        LOGGER.warning("LLM cleanup failed for question %s: %s", item.get("question_number"), exc)
+    return item
 
 
 def make_llm_client(config: dict[str, Any], base_dir: Path) -> OpenAICompatibleVisionClient | None:
@@ -620,6 +737,14 @@ def choose_backend(
     if ocr_engine is not None:
         return "ocr"
     return "llm"
+
+
+def normalize_worker_count(value: Any, default: int = 1) -> int:
+    try:
+        workers = int(value)
+    except (TypeError, ValueError):
+        workers = default
+    return max(1, workers)
 
 
 def find_exam_pairs(pdfs: list[Path], config: dict[str, Any], base_dir: Path) -> list[ExamPair]:

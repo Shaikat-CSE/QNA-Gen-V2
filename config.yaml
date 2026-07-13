@@ -2,7 +2,8 @@ input_dir: input
 output_dir: output
 
 render:
-  dpi: 400
+  dpi: 200
+  workers: 4
   keep_rendered_pages: false
 
 model:
@@ -52,6 +53,8 @@ analysis:
   # Defaults to <per-question-pdf-output>/analysis/extracted_qna.json.
   output_json:
   dpi: 200
+  workers: 6
+  cleanup_workers: 8
   keep_pages: false
   cleanup_with_llm: true
   page_start:
@@ -60,13 +63,13 @@ analysis:
   ms_page_end:
   llm:
     enabled: true
-    # OpenAI-compatible client. Environment fallbacks include KIMI_API_KEY/KIMI_MODEL/KIMI_BASE_URL.
+    # OpenAI-compatible client. Uses GEMINI_* env vars from .env.
     api_key:
-    api_key_env:
+    api_key_env: GEMINI_API_KEY
     base_url:
-    base_url_env:
+    base_url_env: GEMINI_BASE_URL
     model:
-    model_env:
+    model_env: GEMINI_MODEL
     dotenv_path: .env
     cache_dir: .cache/question_analysis
     temperature: 0.1

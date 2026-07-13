@@ -222,7 +222,10 @@ def main() -> int:
                 add_optional_int(command, "--ms-page-start", "First MS analysis page")
                 add_optional_int(command, "--ms-page-end", "Last MS analysis page")
             add_optional_int(command, "--dpi", "Extraction render DPI")
+            add_optional_int(command, "--workers", "Extraction page workers")
             add_optional_int(command, "--analysis-dpi", "Analysis render DPI")
+            add_optional_int(command, "--analysis-workers", "Analysis page workers")
+            add_optional_int(command, "--cleanup-workers", "LLM cleanup workers")
             add_optional_float(command, "--confidence", "Detection confidence threshold")
             add_optional_int(
                 command, "--image-size", "DocLayout-YOLO inference image size"

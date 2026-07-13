@@ -12,7 +12,7 @@ PDFs (QP + MS)
     |
     v
 +--------------------------------------------------------------+
-|  1. Render -- PyMuPDF @ 400 DPI                              |
+|  1. Render -- PyMuPDF @ 200 DPI                              |
 |     -> Page images (PNG)                                      |
 +--------------------------------------------------------------+
 |  2. Detect -- DocLayout-YOLO figure detection                 |
@@ -49,6 +49,7 @@ PDFs (QP + MS)
 | **HTML Workbook** | 3-column layout, search, MCQ radio buttons, MathJax, answer reveal toggle |
 | **Batch Processing** | Thousands of PDFs, automatic QP/MS pairing by filename |
 | **Interactive CLI** | Iterative launcher with guided prompts, loops for multiple runs |
+| **Fast Defaults** | 200 DPI rendering plus parallel workers for extraction, analysis, and LLM cleanup |
 
 ---
 
@@ -108,6 +109,7 @@ After each run, asks "Run another pipeline?" and loops back.
 python -m src.pipeline --config config.yaml --input input\2021-qp.pdf `
   --qp-pdf input\2021-qp.pdf --ms-pdf input\2021-ms.pdf `
   --analyze --analysis-mode llm `
+  --workers 4 --analysis-workers 6 --cleanup-workers 8 `
   --html --html-group-by-parent `
   --subject "IGCSE Biology" --year 2021 --paper-key "4BI1 1.0"
 ```
@@ -118,6 +120,9 @@ python -m src.pipeline --config config.yaml --input input\2021-qp.pdf `
 | `--input` | Limits extraction to this specific PDF (not all in input/) |
 | `--qp-pdf` / `--ms-pdf` | Specifies which files to analyze for Q&A extraction |
 | `--analysis-mode llm` | Forces LLM vision on every page |
+| `--workers` | Parallel page workers for diagram extraction |
+| `--analysis-workers` | Parallel workers for page-level QP/MS analysis |
+| `--cleanup-workers` | Parallel workers for optional LLM cleanup |
 | `--html-group-by-parent` | Groups sub-parts (`1(a)`, `1(b)`) under parent question (`1`) |
 
 ### Extract Only (Diagrams + Metadata)
@@ -130,7 +135,8 @@ python -m src.pipeline --config config.yaml
 
 ```powershell
 python -m src.pipeline --input input\exam.pdf --output output\my_exam `
-  --device cuda:0 --confidence 0.25 --page-start 1 --page-end 10
+  --device cuda:0 --confidence 0.25 --dpi 200 --workers 4 `
+  --analysis-workers 6 --cleanup-workers 8 --page-start 1 --page-end 10
 ```
 
 ### Specify QP/MS Pair Explicitly
@@ -150,6 +156,30 @@ python -m src.pipeline --analyze `
 | `auto` (default) | LLM vision if credentials available, falls back to OCR |
 | `llm` | Force OpenAI-compatible vision analysis (best for scanned PDFs) |
 | `ocr` | PaddleOCR + heuristic splitting (no API key needed) |
+
+---
+
+## Performance Tuning
+
+The default pipeline now renders at `200` DPI instead of `400` DPI. This reduces page image size substantially and speeds up rendering, detection, upload, and LLM vision calls while keeping enough detail for typical scanned exam papers.
+
+Parallel workers are enabled by default:
+
+| Setting | Default | What it controls |
+|---|---:|---|
+| `render.workers` | 4 | Diagram extraction page processing |
+| `analysis.workers` | 6 | QP/MS page LLM or OCR analysis |
+| `analysis.cleanup_workers` | 8 | Optional LLM HTML cleanup |
+
+For maximum throughput, increase workers until your CPU/GPU, disk, memory, or LLM provider rate limit becomes the bottleneck:
+
+```powershell
+python -m src.pipeline --config config.yaml --analyze --analysis-mode llm `
+  --dpi 200 --analysis-dpi 200 `
+  --workers 6 --analysis-workers 8 --cleanup-workers 12
+```
+
+If the LLM provider returns rate-limit or timeout errors, lower `--analysis-workers` and `--cleanup-workers`. Use `--workers 1 --analysis-workers 1 --cleanup-workers 1` to restore mostly sequential behavior for debugging.
 
 ---
 
@@ -181,7 +211,8 @@ output/
 
 | Section | Key Setting |
 |---|---|
-| `render.dpi` | 400 (default) |
+| `render.dpi` | 200 (default) |
+| `render.workers` | 4 parallel page workers |
 | `detection.confidence` | 0.2 |
 | `detection.figure_labels` | `["figure"]` |
 | `crop.padding` | 20px |
@@ -190,6 +221,8 @@ output/
 | `quality.max_aspect_ratio` | 4.0 (kills wide strips) |
 | `quality.min_confidence` | 0.6 (kills low-confidence detections) |
 | `analysis.mode` | `auto` / `llm` / `ocr` |
+| `analysis.workers` | 6 parallel page-analysis workers |
+| `analysis.cleanup_workers` | 8 parallel LLM cleanup workers |
 | `analysis.llm` | API key, model, base URL, cache dir |
 | `html.group_by_parent` | Groups sub-parts under parent question |
 

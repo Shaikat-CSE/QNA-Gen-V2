@@ -20,7 +20,7 @@ class RenderedPage:
 def render_pdf(
     pdf_path: Path,
     output_dir: Path,
-    dpi: int = 400,
+    dpi: int = 200,
     page_start: int | None = None,
     page_end: int | None = None,
 ) -> Iterator[RenderedPage]:

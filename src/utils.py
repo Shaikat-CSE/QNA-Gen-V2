@@ -12,7 +12,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "input_dir": "input",
     "output_dir": "output",
     "render": {
-        "dpi": 400,
+        "dpi": 200,
+        "workers": 4,
         "keep_rendered_pages": False,
     },
     "model": {
@@ -52,6 +53,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "ms_pdf": None,
         "output_json": None,
         "dpi": 200,
+        "workers": 6,
+        "cleanup_workers": 8,
         "keep_pages": False,
         "cleanup_with_llm": True,
         "page_start": None,
