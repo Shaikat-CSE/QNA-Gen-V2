@@ -55,3 +55,22 @@ def render_pdf(
             )
     finally:
         document.close()
+
+
+def count_rendered_pages(
+    pdf_path: Path,
+    page_start: int | None = None,
+    page_end: int | None = None,
+) -> int:
+    try:
+        import fitz
+    except ImportError as exc:
+        raise RuntimeError("PyMuPDF is required for rendering. Run: pip install -r requirements.txt") from exc
+
+    document = fitz.open(pdf_path)
+    try:
+        first_page = max((page_start or 1) - 1, 0)
+        last_page = min(page_end or document.page_count, document.page_count)
+        return max(0, last_page - first_page)
+    finally:
+        document.close()

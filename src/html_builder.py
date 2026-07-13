@@ -83,6 +83,7 @@ def build_workbook(
     )
 
     generator = HTMLGenerator(str(output_dir), subject_name=subject_name, year=year, paper_key=paper_key)
+    remove_stale_question_pages(output_dir)
     generated_pages = [
         generator.generate_qna_page(qna, prepared_qnas, index)
         for index, qna in enumerate(prepared_qnas)
@@ -99,6 +100,12 @@ def build_workbook(
     }
     write_json(output_dir / "html_manifest.json", manifest)
     return manifest
+
+
+def remove_stale_question_pages(output_dir: Path) -> None:
+    for path in output_dir.glob("q_*.html"):
+        if path.is_file():
+            path.unlink()
 
 
 def prepare_qnas(

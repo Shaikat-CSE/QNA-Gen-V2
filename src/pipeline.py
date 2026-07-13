@@ -9,12 +9,13 @@ from typing import Any
 from .crop import extract_figure_crop, passes_quality, save_crop
 from .detect import Detection, DocLayoutFigureDetector
 from .ocr import PaddleTextExtractor
-from .render import RenderedPage, render_pdf
+from .render import RenderedPage, count_rendered_pages, render_pdf
 from .utils import (
     ensure_dir,
     list_pdfs,
     load_config,
     make_pdf_output_dir,
+    ProgressBar,
     relative_to_or_absolute,
     resolve_path,
     sanitize_name,
@@ -112,6 +113,11 @@ def process_pdf(
     pages_dir = ensure_dir(pdf_output_dir / "pages")
     keep_pages = bool(config["render"].get("keep_rendered_pages", False))
     workers = normalize_worker_count(config["render"].get("workers"), default=1)
+    total_pages = count_rendered_pages(
+        pdf_path,
+        page_start=config.get("page_start"),
+        page_end=config.get("page_end"),
+    )
     diagrams: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
 
@@ -123,53 +129,56 @@ def process_pdf(
         page_end=config.get("page_end"),
     )
 
-    if workers <= 1:
-        for rendered_page in rendered_pages:
-            try:
-                page_diagrams = process_page(
-                    rendered_page,
-                    pdf_output_dir,
-                    pdf_path,
-                    input_root,
-                    output_root,
-                    config,
-                    detector,
-                    ocr_extractor,
-                )
-                diagrams.extend(page_diagrams)
-            except Exception as exc:
-                LOGGER.exception("Failed page %s of %s", rendered_page.page_number, pdf_path)
-                errors.append({"pdf": str(pdf_path), "page": rendered_page.page_number, "error": str(exc)})
-            finally:
-                if not keep_pages:
-                    rendered_page.image_path.unlink(missing_ok=True)
-    else:
-        LOGGER.info("Processing %s with %s page worker(s)", pdf_path, workers)
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = {
-                executor.submit(
-                    process_page,
-                    rendered_page,
-                    pdf_output_dir,
-                    pdf_path,
-                    input_root,
-                    output_root,
-                    config,
-                    detector,
-                    ocr_extractor,
-                ): rendered_page
-                for rendered_page in rendered_pages
-            }
-            for future in as_completed(futures):
-                rendered_page = futures[future]
+    with ProgressBar(f"Extract {pdf_path.name}", total_pages) as progress:
+        if workers <= 1:
+            for rendered_page in rendered_pages:
                 try:
-                    diagrams.extend(future.result())
+                    page_diagrams = process_page(
+                        rendered_page,
+                        pdf_output_dir,
+                        pdf_path,
+                        input_root,
+                        output_root,
+                        config,
+                        detector,
+                        ocr_extractor,
+                    )
+                    diagrams.extend(page_diagrams)
                 except Exception as exc:
                     LOGGER.exception("Failed page %s of %s", rendered_page.page_number, pdf_path)
                     errors.append({"pdf": str(pdf_path), "page": rendered_page.page_number, "error": str(exc)})
                 finally:
                     if not keep_pages:
                         rendered_page.image_path.unlink(missing_ok=True)
+                    progress.update()
+        else:
+            LOGGER.info("Processing %s with %s page worker(s)", pdf_path, workers)
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = {
+                    executor.submit(
+                        process_page,
+                        rendered_page,
+                        pdf_output_dir,
+                        pdf_path,
+                        input_root,
+                        output_root,
+                        config,
+                        detector,
+                        ocr_extractor,
+                    ): rendered_page
+                    for rendered_page in rendered_pages
+                }
+                for future in as_completed(futures):
+                    rendered_page = futures[future]
+                    try:
+                        diagrams.extend(future.result())
+                    except Exception as exc:
+                        LOGGER.exception("Failed page %s of %s", rendered_page.page_number, pdf_path)
+                        errors.append({"pdf": str(pdf_path), "page": rendered_page.page_number, "error": str(exc)})
+                    finally:
+                        if not keep_pages:
+                            rendered_page.image_path.unlink(missing_ok=True)
+                        progress.update()
 
     diagrams.sort(key=lambda item: (int(item.get("page") or 0), int(item.get("figure") or 0)))
 
@@ -324,8 +333,16 @@ def apply_cli_overrides(config: dict[str, Any], args: argparse.Namespace) -> Non
         analysis_config["output_json"] = args.analysis_output
     if args.analysis_dpi is not None:
         analysis_config["dpi"] = args.analysis_dpi
+    if args.analysis_image_size is not None:
+        analysis_config["image_size"] = args.analysis_image_size
+    if args.page_plan is not None:
+        analysis_config["page_plan_enabled"] = args.page_plan
     if args.analysis_workers is not None:
         analysis_config["workers"] = args.analysis_workers
+    if args.qp_workers is not None:
+        analysis_config["qp_workers"] = args.qp_workers
+    if args.ms_workers is not None:
+        analysis_config["ms_workers"] = args.ms_workers
     if args.cleanup_workers is not None:
         analysis_config["cleanup_workers"] = args.cleanup_workers
     if args.keep_analysis_pages is not None:
@@ -480,7 +497,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ms-pdf", help="Mark scheme PDF for analysis")
     parser.add_argument("--analysis-output", help="Path for extracted_qna.json")
     parser.add_argument("--analysis-dpi", type=int, help="DPI for analysis page images")
-    parser.add_argument("--analysis-workers", type=int, help="Parallel workers for analysis page LLM/OCR calls")
+    parser.add_argument("--analysis-image-size", type=int, help="Square pixel size for analysis page images")
+    parser.add_argument("--page-plan", action=argparse.BooleanOptionalAction, default=None, help="Plan QP page numbering before extraction")
+    parser.add_argument("--analysis-workers", type=int, help="Default parallel workers for analysis page LLM/OCR calls")
+    parser.add_argument("--qp-workers", type=int, help="Question-paper page workers; keep at 1 for best numbering")
+    parser.add_argument("--ms-workers", type=int, help="Mark-scheme page workers")
     parser.add_argument("--cleanup-workers", type=int, help="Parallel workers for optional LLM cleanup")
     parser.add_argument("--keep-analysis-pages", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--cleanup-with-llm", action=argparse.BooleanOptionalAction, default=None)

@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import sys
+import threading
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Iterable
@@ -53,7 +56,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "ms_pdf": None,
         "output_json": None,
         "dpi": 200,
+        "image_size": 1000,
+        "page_plan_enabled": True,
         "workers": 6,
+        "qp_workers": None,
+        "ms_workers": 6,
         "cleanup_workers": 8,
         "keep_pages": False,
         "cleanup_with_llm": True,
@@ -186,3 +193,46 @@ def relative_to_or_absolute(path: Path, base: Path) -> str:
 
 def flatten(items: Iterable[Iterable[Any]]) -> list[Any]:
     return [value for group in items for value in group]
+
+
+class ProgressBar:
+    def __init__(self, label: str, total: int, enabled: bool | None = None) -> None:
+        self.label = label
+        self.total = max(0, int(total))
+        self.current = 0
+        self.width = 28
+        self._lock = threading.Lock()
+        self.enabled = (
+            enabled
+            if enabled is not None
+            else self.total > 0 and sys.stderr.isatty() and not os.environ.get("NO_PROGRESS")
+        )
+
+    def __enter__(self) -> "ProgressBar":
+        self.render()
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        self.close()
+
+    def update(self, amount: int = 1) -> None:
+        if not self.enabled:
+            return
+        with self._lock:
+            self.current = min(self.total, self.current + amount)
+            self.render()
+
+    def render(self) -> None:
+        if not self.enabled:
+            return
+        ratio = self.current / self.total if self.total else 1.0
+        filled = min(self.width, int(round(self.width * ratio)))
+        bar = "#" * filled + "-" * (self.width - filled)
+        percent = int(round(ratio * 100))
+        sys.stderr.write(f"\r{self.label} [{bar}] {self.current}/{self.total} {percent:3d}%")
+        sys.stderr.flush()
+
+    def close(self) -> None:
+        if self.enabled:
+            sys.stderr.write("\n")
+            sys.stderr.flush()

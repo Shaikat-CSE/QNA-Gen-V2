@@ -53,7 +53,12 @@ analysis:
   # Defaults to <per-question-pdf-output>/analysis/extracted_qna.json.
   output_json:
   dpi: 200
+  image_size: 1000
+  page_plan_enabled: true
   workers: 6
+  # Optional override. Defaults to 'workers' count if page_plan_enabled is true, otherwise 1.
+  qp_workers:
+  ms_workers: 6
   cleanup_workers: 8
   keep_pages: false
   cleanup_with_llm: true

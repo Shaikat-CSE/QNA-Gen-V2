@@ -9,8 +9,13 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from .question_analysis import ExamPair, find_exam_pairs
-from .utils import list_pdfs, load_config, relative_to_or_absolute, resolve_path
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from src.question_analysis import ExamPair, find_exam_pairs
+    from src.utils import list_pdfs, load_config, relative_to_or_absolute, resolve_path
+else:
+    from .question_analysis import ExamPair, find_exam_pairs
+    from .utils import list_pdfs, load_config, relative_to_or_absolute, resolve_path
 
 USE_COLOR = (
     not os.environ.get("NO_COLOR")
@@ -224,7 +229,10 @@ def main() -> int:
             add_optional_int(command, "--dpi", "Extraction render DPI")
             add_optional_int(command, "--workers", "Extraction page workers")
             add_optional_int(command, "--analysis-dpi", "Analysis render DPI")
+            add_optional_int(command, "--analysis-image-size", "Analysis square image size")
             add_optional_int(command, "--analysis-workers", "Analysis page workers")
+            add_optional_int(command, "--qp-workers", "QP analysis workers")
+            add_optional_int(command, "--ms-workers", "MS analysis workers")
             add_optional_int(command, "--cleanup-workers", "LLM cleanup workers")
             add_optional_float(command, "--confidence", "Detection confidence threshold")
             add_optional_int(

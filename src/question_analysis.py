@@ -10,12 +10,12 @@ import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from .render import render_pdf
-from .utils import ensure_dir, make_pdf_output_dir, relative_to_or_absolute, resolve_path, sanitize_name, write_json
+from .render import count_rendered_pages, render_pdf
+from .utils import ProgressBar, ensure_dir, make_pdf_output_dir, relative_to_or_absolute, resolve_path, sanitize_name, write_json
 
 LOGGER = logging.getLogger(__name__)
 
@@ -84,7 +84,12 @@ def analyze_exam_pair(
     mode = str(analysis_config.get("mode", "auto")).lower()
     dpi = int(analysis_config.get("dpi", 200))
     keep_pages = bool(analysis_config.get("keep_pages", False))
+    image_size = normalize_int_or_none(analysis_config.get("image_size")) or 1000
+    page_plan_enabled = bool(analysis_config.get("page_plan_enabled", True))
     workers = normalize_worker_count(analysis_config.get("workers"), default=1)
+    default_qp_workers = workers if page_plan_enabled else 1
+    qp_workers = normalize_worker_count(analysis_config.get("qp_workers"), default=default_qp_workers)
+    ms_workers = normalize_worker_count(analysis_config.get("ms_workers"), default=workers)
     cleanup_workers = normalize_worker_count(
         analysis_config.get("cleanup_workers"),
         default=workers,
@@ -104,7 +109,9 @@ def analyze_exam_pair(
         llm_client=llm_client,
         ocr_engine=ocr_engine,
         config=analysis_config,
-        workers=workers,
+        workers=qp_workers,
+        image_size=image_size,
+        page_plan_enabled=page_plan_enabled,
     )
 
     answers: list[dict[str, Any]] = []
@@ -119,7 +126,8 @@ def analyze_exam_pair(
             llm_client=llm_client,
             ocr_engine=ocr_engine,
             config=analysis_config,
-            workers=workers,
+            workers=ms_workers,
+            image_size=image_size,
         )
     else:
         LOGGER.warning("No mark scheme PDF available for %s", pair.question_pdf.name)
@@ -163,67 +171,267 @@ def analyze_question_pdf(
     ocr_engine: "PageOCREngine | None",
     config: dict[str, Any],
     workers: int = 1,
+    image_size: int = 1000,
+    page_plan_enabled: bool = True,
 ) -> list[dict[str, Any]]:
     pages_dir = ensure_dir(output_dir / "qp_pages")
     questions: list[dict[str, Any]] = []
     active_question = "1"
-    rendered_pages = render_pdf(
+    total_pages = count_rendered_pages(
+        pdf_path,
+        page_start=config.get("page_start"),
+        page_end=config.get("page_end"),
+    )
+    rendered_pages = list(render_pdf(
         pdf_path,
         pages_dir,
         dpi=dpi,
         page_start=config.get("page_start"),
         page_end=config.get("page_end"),
+    ))
+    rendered_pages = normalize_rendered_pages_to_square(rendered_pages, image_size)
+    page_plans = (
+        plan_question_pages(rendered_pages, llm_client, workers=workers)
+        if page_plan_enabled and llm_client is not None and choose_backend(mode, llm_client, ocr_engine) == "llm"
+        else {}
     )
 
-    if workers <= 1:
-        for rendered_page in rendered_pages:
-            normalized, active_question, backend = analyze_question_page_render(
-                rendered_page,
-                diagrams_by_page,
-                mode,
-                llm_client,
-                ocr_engine,
-                active_question,
-                keep_pages,
-            )
-            questions.extend(normalized)
-            LOGGER.info(
-                "QP page %s analyzed with %s backend: %s question block(s)",
-                rendered_page.page_number,
-                backend,
-                len(normalized),
-            )
-    else:
-        LOGGER.info("Analyzing QP pages with %s worker(s)", workers)
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = {
-                executor.submit(
-                    analyze_question_page_render,
+    with ProgressBar(f"Analyze QP {pdf_path.name}", total_pages) as progress:
+        if workers <= 1:
+            for rendered_page in rendered_pages:
+                page_plan = page_plans.get(rendered_page.page_number)
+                active_question = planned_active_question(page_plan, active_question)
+                normalized, active_question, backend = analyze_question_page_render(
                     rendered_page,
                     diagrams_by_page,
                     mode,
                     llm_client,
                     ocr_engine,
-                    "unknown",
+                    active_question,
                     keep_pages,
-                ): rendered_page
-                for rendered_page in rendered_pages
-            }
-            for future in as_completed(futures):
-                rendered_page = futures[future]
-                normalized, _active_question, backend = future.result()
+                    page_plan=page_plan,
+                )
                 questions.extend(normalized)
-                LOGGER.info(
+                LOGGER.debug(
                     "QP page %s analyzed with %s backend: %s question block(s)",
                     rendered_page.page_number,
                     backend,
                     len(normalized),
                 )
+                progress.update()
+        else:
+            LOGGER.info("Analyzing QP pages with %s worker(s)", workers)
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = {
+                    executor.submit(
+                        analyze_question_page_render,
+                        rendered_page,
+                        diagrams_by_page,
+                        mode,
+                        llm_client,
+                        ocr_engine,
+                        planned_active_question(page_plans.get(rendered_page.page_number), "unknown"),
+                        keep_pages,
+                        page_plan=page_plans.get(rendered_page.page_number),
+                    ): rendered_page
+                    for rendered_page in rendered_pages
+                }
+                for future in as_completed(futures):
+                    rendered_page = futures[future]
+                    normalized, _active_question, backend = future.result()
+                    questions.extend(normalized)
+                    LOGGER.debug(
+                        "QP page %s analyzed with %s backend: %s question block(s)",
+                        rendered_page.page_number,
+                        backend,
+                        len(normalized),
+                    )
+                    progress.update()
 
     if not keep_pages:
         try_remove_dir(pages_dir)
 
     return sort_blocks(questions)
+
+
+def normalize_rendered_pages_to_square(rendered_pages: list[Any], image_size: int) -> list[Any]:
+    if image_size <= 0:
+        return rendered_pages
+
+    normalized_pages = []
+    for rendered_page in rendered_pages:
+        normalize_page_image_to_square(rendered_page.image_path, image_size)
+        normalized_pages.append(replace(rendered_page, width=image_size, height=image_size))
+    return normalized_pages
+
+
+def normalize_page_image_to_square(image_path: Path, image_size: int) -> None:
+    try:
+        import cv2
+    except ImportError as exc:
+        raise RuntimeError("opencv-python is required for analysis image resizing") from exc
+
+    image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+    if image is None:
+        raise RuntimeError(f"Could not read analysis page image: {image_path}")
+
+    # Directly resize (stretch) to image_size x image_size to match coordinate mapping
+    resized = cv2.resize(image, (image_size, image_size), interpolation=cv2.INTER_AREA)
+
+    if not cv2.imwrite(str(image_path), resized):
+        raise RuntimeError(f"Could not save normalized analysis page image: {image_path}")
+
+
+def plan_question_pages(
+    rendered_pages: list[Any],
+    llm_client: "OpenAICompatibleVisionClient",
+    workers: int = 1,
+) -> dict[int, dict[str, Any]]:
+    raw_plans: dict[int, dict[str, Any]] = {}
+
+    def plan_single_page(rendered_page: Any) -> tuple[int, dict[str, Any]]:
+        plan = llm_client.analyze_question_page_plan(
+            rendered_page.image_path,
+            rendered_page.page_number,
+            "previous_active",
+        )
+        return rendered_page.page_number, plan
+
+    with ProgressBar("Plan QP sequence", len(rendered_pages)) as progress:
+        if workers <= 1:
+            for rendered_page in rendered_pages:
+                try:
+                    page_number, plan = plan_single_page(rendered_page)
+                    raw_plans[page_number] = plan
+                except Exception as exc:
+                    LOGGER.warning("QP page planning failed for page %s: %s", rendered_page.page_number, exc)
+                finally:
+                    progress.update()
+        else:
+            LOGGER.info("Planning QP sequence with %s worker(s)", workers)
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = {
+                    executor.submit(plan_single_page, rendered_page): rendered_page
+                    for rendered_page in rendered_pages
+                }
+                for future in as_completed(futures):
+                    rendered_page = futures[future]
+                    try:
+                        page_number, plan = future.result()
+                        raw_plans[page_number] = plan
+                    except Exception as exc:
+                        LOGGER.warning("QP page planning failed for page %s: %s", rendered_page.page_number, exc)
+                    finally:
+                        progress.update()
+
+    page_plans: dict[int, dict[str, Any]] = {}
+    active_question = "1"
+    for rendered_page in rendered_pages:
+        plan = raw_plans.get(rendered_page.page_number)
+        plan = normalize_page_plan(plan, rendered_page.page_number, active_question)
+        active_question = planned_active_question(plan, active_question)
+        page_plans[rendered_page.page_number] = plan
+
+    return page_plans
+
+
+ROMAN_RE = re.compile(r"^[ivx]+$", re.I)
+
+def is_roman_numeral(value: str) -> bool:
+    return bool(ROMAN_RE.match(value))
+
+
+def parse_label_components(label: str) -> list[str]:
+    return re.findall(r"[a-zA-Z0-9]+", label)
+
+
+def format_label_components(components: list[str]) -> str:
+    if not components:
+        return ""
+    result = components[0]
+    for comp in components[1:]:
+        result += f"({comp})"
+    return result
+
+
+def resolve_relative_question_label(relative: str, base: str) -> str:
+    relative_clean = normalize_question_label(relative)
+    if not relative_clean or relative_clean in {"previousactive", "previous_active"}:
+        return base
+
+    rel_comps = parse_label_components(relative_clean)
+    base_comps = parse_label_components(base)
+
+    if not rel_comps:
+        return base
+    if not base_comps:
+        return relative_clean
+
+    first_rel = rel_comps[0]
+
+    # If it is a placeholder word like 'previous' or 'active', ignore and return base
+    if first_rel in {"previous", "active", "previousactive"}:
+        # Check if there are other comps appended
+        if len(rel_comps) > 2:
+            rel_comps = rel_comps[2:]
+            first_rel = rel_comps[0]
+        else:
+            return base
+
+    if first_rel.isdigit():
+        return format_label_components(rel_comps)
+
+    if first_rel.isalpha() and not is_roman_numeral(first_rel):
+        main_num = base_comps[0] if base_comps[0].isdigit() else "1"
+        return format_label_components([main_num] + rel_comps)
+
+    if is_roman_numeral(first_rel):
+        prefix_comps = []
+        if base_comps[0].isdigit():
+            prefix_comps.append(base_comps[0])
+            if len(base_comps) > 1 and base_comps[1].isalpha() and not is_roman_numeral(base_comps[1]):
+                prefix_comps.append(base_comps[1])
+        if not prefix_comps:
+            prefix_comps = ["1", "a"]
+        return format_label_components(prefix_comps + rel_comps)
+
+    return relative_clean
+
+
+def normalize_page_plan(plan: dict[str, Any] | None, page_number: int, fallback_active_question: str) -> dict[str, Any]:
+    visible = plan.get("visible_question_numbers") if isinstance(plan, dict) else []
+    if not isinstance(visible, list):
+        visible = []
+    visible = [normalize_question_label(str(item)) for item in visible if str(item).strip()]
+
+    raw_active = str(plan.get("active_parent_question") or "") if isinstance(plan, dict) else ""
+    active = resolve_relative_question_label(raw_active, fallback_active_question)
+    
+    if not active or not active[0].isdigit():
+        active = infer_active_question_from_numbers(visible) or fallback_active_question
+
+    return {
+        "page_number": page_number,
+        "active_parent_question": active,
+        "visible_question_numbers": visible,
+        "continues_previous_question": bool(plan.get("continues_previous_question", False)) if isinstance(plan, dict) else False,
+        "notes": str(plan.get("notes") or "") if isinstance(plan, dict) else "",
+    }
+
+
+def planned_active_question(page_plan: dict[str, Any] | None, fallback: str) -> str:
+    if not page_plan:
+        return fallback
+    active = normalize_question_label(str(page_plan.get("active_parent_question") or ""))
+    return active or fallback
+
+
+def infer_active_question_from_numbers(question_numbers: list[str]) -> str | None:
+    for value in question_numbers:
+        match = re.match(r"^(\d+)", value)
+        if match:
+            return match.group(1)
+    return None
 
 
 def analyze_question_page_render(
@@ -234,6 +442,7 @@ def analyze_question_page_render(
     ocr_engine: "PageOCREngine | None",
     active_question: str,
     keep_pages: bool,
+    page_plan: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], str, str]:
     backend = choose_backend(mode, llm_client, ocr_engine)
     page_diagrams = diagrams_by_page.get(rendered_page.page_number, [])
@@ -245,6 +454,7 @@ def analyze_question_page_render(
                 rendered_page.page_number,
                 active_question,
                 page_diagrams,
+                page_plan=page_plan,
             )
         elif backend == "ocr" and ocr_engine is not None:
             ocr_lines = ocr_engine.extract_lines(rendered_page.image_path)
@@ -284,57 +494,67 @@ def analyze_mark_scheme_pdf(
     ocr_engine: "PageOCREngine | None",
     config: dict[str, Any],
     workers: int = 1,
+    image_size: int = 1000,
 ) -> list[dict[str, Any]]:
     pages_dir = ensure_dir(output_dir / "ms_pages")
     answers: list[dict[str, Any]] = []
-    rendered_pages = render_pdf(
+    total_pages = count_rendered_pages(
+        pdf_path,
+        page_start=config.get("ms_page_start"),
+        page_end=config.get("ms_page_end"),
+    )
+    rendered_pages = list(render_pdf(
         pdf_path,
         pages_dir,
         dpi=dpi,
         page_start=config.get("ms_page_start"),
         page_end=config.get("ms_page_end"),
-    )
+    ))
+    rendered_pages = normalize_rendered_pages_to_square(rendered_pages, image_size)
 
-    if workers <= 1:
-        for rendered_page in rendered_pages:
-            normalized, backend = analyze_mark_scheme_page_render(
-                rendered_page,
-                mode,
-                llm_client,
-                ocr_engine,
-                keep_pages,
-            )
-            answers.extend(normalized)
-            LOGGER.info(
-                "MS page %s analyzed with %s backend: %s answer block(s)",
-                rendered_page.page_number,
-                backend,
-                len(normalized),
-            )
-    else:
-        LOGGER.info("Analyzing MS pages with %s worker(s)", workers)
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = {
-                executor.submit(
-                    analyze_mark_scheme_page_render,
+    with ProgressBar(f"Analyze MS {pdf_path.name}", total_pages) as progress:
+        if workers <= 1:
+            for rendered_page in rendered_pages:
+                normalized, backend = analyze_mark_scheme_page_render(
                     rendered_page,
                     mode,
                     llm_client,
                     ocr_engine,
                     keep_pages,
-                ): rendered_page
-                for rendered_page in rendered_pages
-            }
-            for future in as_completed(futures):
-                rendered_page = futures[future]
-                normalized, backend = future.result()
+                )
                 answers.extend(normalized)
-                LOGGER.info(
+                LOGGER.debug(
                     "MS page %s analyzed with %s backend: %s answer block(s)",
                     rendered_page.page_number,
                     backend,
                     len(normalized),
                 )
+                progress.update()
+        else:
+            LOGGER.info("Analyzing MS pages with %s worker(s)", workers)
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = {
+                    executor.submit(
+                        analyze_mark_scheme_page_render,
+                        rendered_page,
+                        mode,
+                        llm_client,
+                        ocr_engine,
+                        keep_pages,
+                    ): rendered_page
+                    for rendered_page in rendered_pages
+                }
+                for future in as_completed(futures):
+                    rendered_page = futures[future]
+                    normalized, backend = future.result()
+                    answers.extend(normalized)
+                    LOGGER.debug(
+                        "MS page %s analyzed with %s backend: %s answer block(s)",
+                        rendered_page.page_number,
+                        backend,
+                        len(normalized),
+                    )
+                    progress.update()
 
     if not keep_pages:
         try_remove_dir(pages_dir)
@@ -398,6 +618,7 @@ class OpenAICompatibleVisionClient:
         page_number: int,
         active_question: str,
         diagrams: list[dict[str, Any]],
+        page_plan: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         diagrams_payload = [
             {
@@ -407,6 +628,7 @@ class OpenAICompatibleVisionClient:
             }
             for diagram in diagrams
         ]
+        page_plan_payload = page_plan or {}
         prompt = f"""You are analyzing one page of an exam question paper.
 
 Return only valid JSON. Do not include markdown fences.
@@ -414,7 +636,7 @@ Return only valid JSON. Do not include markdown fences.
 Task:
 1. Extract every real question/sub-question visible on this page in reading order.
 2. Preserve the question numbering exactly, e.g. "1", "1(a)", "1(b)(ii)".
-3. If a question continues from the previous page and the parent number is not shown, infer the parent from visible numbering/context. If it is impossible to infer, use parent "{active_question}".
+3. If a question continues from the previous page and the parent number is not shown, use the page plan and active parent "{active_question}".
 4. CRITICAL: Always extract the intro/context text that appears before the first sub-question as a separate question with the parent number only (e.g. "1", "2", "3"). This intro text often describes a diagram, experiment, or scenario. Do NOT merge it into the first sub-question.
 5. Clean the question text for HTML presentation: remove page headers/footers, page numbers, candidate instructions that are not part of a question, answer dotted lines, repeated underscores, and handwriting space.
 6. Preserve science/math notation using LaTeX delimiters \\( ... \\) or \\[ ... \\].
@@ -426,6 +648,9 @@ Task:
 
 Supplied diagrams on this page:
 {json.dumps(diagrams_payload, ensure_ascii=False)}
+
+Precomputed page sequence plan:
+{json.dumps(page_plan_payload, ensure_ascii=False)}
 
 Required JSON shape:
 {{
@@ -456,6 +681,37 @@ Required JSON shape:
         payload = self._image_json_request(image_path, prompt, cache_prefix=f"qp_p{page_number}")
         questions = payload.get("questions", []) if isinstance(payload, dict) else []
         return questions if isinstance(questions, list) else []
+
+    def analyze_question_page_plan(
+        self,
+        image_path: Path,
+        page_number: int,
+        previous_active_question: str,
+    ) -> dict[str, Any]:
+        prompt = f"""You are planning the sequence of an exam question paper before detailed extraction.
+
+Return only valid JSON. Do not include markdown fences.
+
+Look at this single 1000x1000 page image. Do not extract full question text.
+
+Task:
+1. Identify the active parent label for this page. This may be a main number like "4" or a letter parent like "4(b)" when the visible labels are only "(i)", "(ii)", etc.
+2. List all visible question/sub-question labels in reading order.
+3. If the page continues from a previous page and only labels like (i), (ii), (b), or (c)(i) are visible, attach them to the most specific likely parent. Use previous active parent "{previous_active_question}" if the page itself does not show a better parent.
+4. Preserve labels exactly in normalized form such as "4", "4(a)", "4(b)(ii)".
+5. If uncertain, use the most likely parent from the page context and previous active parent.
+
+Required JSON shape:
+{{
+  "page_number": {page_number},
+  "active_parent_question": "4(b)",
+  "visible_question_numbers": ["4(b)(i)", "4(b)(ii)"],
+  "continues_previous_question": true,
+  "notes": "brief reason"
+}}
+"""
+        payload = self._image_json_request(image_path, prompt, cache_prefix=f"qp_plan_p{page_number}")
+        return payload if isinstance(payload, dict) else {}
 
     def analyze_mark_scheme_page(self, image_path: Path, page_number: int) -> list[dict[str, Any]]:
         prompt = """You are analyzing one page of an exam mark scheme.
@@ -604,9 +860,11 @@ class PageOCREngine:
 
         self.min_confidence = min_confidence
         self.engine = PaddleOCR(use_angle_cls=True, lang=language)
+        self._lock = threading.Lock()
 
     def extract_lines(self, image_path: Path) -> list[dict[str, Any]]:
-        result = self.engine.ocr(str(image_path))
+        with self._lock:
+            result = self.engine.ocr(str(image_path))
         lines: list[dict[str, Any]] = []
         try:
             import cv2
@@ -717,7 +975,7 @@ def make_page_ocr(config: dict[str, Any]) -> PageOCREngine | None:
     mode = str(config.get("mode", "auto")).lower()
     if mode not in {"auto", "ocr"}:
         return None
-    if not bool(ocr_config.get("enabled", False)):
+    if mode != "ocr" and not bool(ocr_config.get("enabled", False)):
         return None
     return PageOCREngine(
         language=str(ocr_config.get("language", "en")),
