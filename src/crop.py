@@ -82,36 +82,38 @@ def is_dotted_writing_space(image: Any, threshold: int = 240) -> bool:
     binary = (gray < threshold).astype(np.uint8)
 
     height, width = binary.shape
-    if width < 50 or height < 20:
+    if width < 50 or height < 15:
         return False
 
-    row_sums = np.sum(binary, axis=1)
-    # Active rows contain at least 3 foreground pixels
-    active_rows = np.where(row_sums >= 3)[0]
-    if len(active_rows) == 0:
+    # Perform connected components analysis to find dot patterns
+    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(binary, connectivity=8)
+
+    total_components = 0
+    dot_components = 0
+
+    for i in range(1, num_labels):
+        area = stats[i, cv2.CC_STAT_AREA]
+        # Ignore sub-pixel noise
+        if area <= 1:
+            continue
+
+        w = stats[i, cv2.CC_STAT_WIDTH]
+        h = stats[i, cv2.CC_STAT_HEIGHT]
+
+        total_components += 1
+
+        # Check if the component is dot-like (small bounding box and area)
+        if w <= 15 and h <= 15 and area <= 60:
+            dot_components += 1
+
+    if total_components == 0:
         return False
 
-    dotted_line_count = 0
-    for y in active_rows:
-        row_pixels = np.where(binary[y] == 1)[0]
-        if len(row_pixels) >= 2:
-            span = row_pixels[-1] - row_pixels[0]
-            # If the dots span at least 75% of the total crop width
-            if span > 0.75 * width:
-                dotted_line_count += 1
+    dot_ratio = dot_components / total_components
 
-    col_sums = np.sum(binary, axis=0)
-    max_col_sum = np.max(col_sums)
-
-    # Dotted writing spaces have no prominent vertical lines
-    has_vertical_line = max_col_sum > 0.35 * height
-
-    # If the majority of active rows are horizontal spans and there is no vertical line,
-    # it is a dotted answer space.
-    if not has_vertical_line:
-        span_ratio = dotted_line_count / len(active_rows)
-        if span_ratio > 0.75:
-            return True
+    # Dotted lines are composed of a large number of repeating tiny dots with no large features.
+    if total_components >= 15 and dot_ratio >= 0.85:
+        return True
 
     return False
 
