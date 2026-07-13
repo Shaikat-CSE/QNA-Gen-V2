@@ -137,18 +137,27 @@ def main() -> int:
         action = prompt_choice(
             "What do you want to run?",
             [
+                ("Auto-process all unprocessed pairs", "auto"),
                 ("Full pipeline: extract + analyze + HTML", "full"),
                 ("Extract + analyze only", "analyze"),
                 ("Extract diagrams only", "extract"),
             ],
-            default="full",
+            default="auto",
         )
         action_labels = {
+            "auto": "Auto-process unprocessed pairs",
             "full": "Full pipeline",
             "analyze": "Extract + analyze",
             "extract": "Extract diagrams only",
         }
         _summary("Action", action_labels[action])
+
+        if action == "auto":
+            last_return_code = auto_process_remaining(config_path, base_dir)
+            if prompt_yes_no("Run another pipeline?", default=False):
+                print()
+                continue
+            break
 
         if action in {"full", "analyze"}:
             command.append("--analyze")
@@ -527,6 +536,117 @@ def display_path(path: Path, base_dir: Path) -> str:
 def format_command(command: list[str]) -> str:
     display = ["python" if index == 0 else part for index, part in enumerate(command)]
     return " ".join(shlex.quote(part) for part in display)
+
+
+def find_unprocessed_pairs(
+    pdfs: list[Path],
+    input_root: Path,
+    output_root: Path,
+    base_dir: Path,
+) -> list[ExamPair]:
+    """Find QP/MS pairs that haven't been processed yet."""
+    all_pairs = find_exam_pairs(pdfs, {}, base_dir)
+    unprocessed: list[ExamPair] = []
+
+    for pair in all_pairs:
+        qp_stem = pair.question_pdf.stem
+        qna_json = output_root / "assets" / qp_stem / "analysis" / "extracted_qna.json"
+
+        if qna_json.exists():
+            continue
+
+        html_marker = output_root / "htmls"
+        if html_marker.exists():
+            for html_dir in html_marker.iterdir():
+                if html_dir.is_dir() and qp_stem.lower() in html_dir.name.lower():
+                    qna_json_alt = html_dir / "qna.json"
+                    if qna_json_alt.exists():
+                        break
+            else:
+                unprocessed.append(pair)
+                continue
+        else:
+            unprocessed.append(pair)
+
+    return unprocessed
+
+
+def build_auto_process_command(
+    pair: ExamPair,
+    config_path: Path,
+    base_dir: Path,
+) -> list[str]:
+    """Build pipeline command for a single pair with default settings."""
+    command = [sys.executable, "-m", "src.pipeline", "--config", str(config_path)]
+    command.extend(["--input", display_path(pair.question_pdf, base_dir)])
+    command.extend(["--qp-pdf", display_path(pair.question_pdf, base_dir)])
+
+    if pair.mark_scheme_pdf is not None:
+        command.extend(["--ms-pdf", display_path(pair.mark_scheme_pdf, base_dir)])
+
+    command.append("--analyze")
+    command.extend(["--analysis-mode", "llm"])
+
+    command.append("--html")
+    command.append("--html-group-by-parent")
+    defaults = infer_labels(pair)
+    add_option(command, "--subject", defaults["subject"])
+    add_option(command, "--year", defaults["year"])
+    add_option(command, "--paper-key", defaults["paper_key"])
+
+    return command
+
+
+def auto_process_remaining(
+    config_path: Path,
+    base_dir: Path,
+) -> int:
+    """Find and process all unprocessed QP/MS pairs."""
+    config = load_config(config_path)
+    input_path = resolve_path(config["input_dir"], base_dir)
+    output_path = resolve_path(config["output_dir"], base_dir)
+    pdfs = list_pdfs(input_path)
+    input_root = input_path if input_path.is_dir() else input_path.parent
+
+    unprocessed = find_unprocessed_pairs(pdfs, input_root, output_path, base_dir)
+
+    if not unprocessed:
+        _ok("All pairs already processed.")
+        return 0
+
+    _section("Unprocessed Pairs Found")
+    for i, pair in enumerate(unprocessed, 1):
+        label = pair_label(pair, input_root)
+        print(f"  {_cyan(str(i))}. {label}")
+
+    print()
+    if not prompt_yes_no(f"Process {len(unprocessed)} unprocessed pair(s)?", default=True):
+        _warn("Cancelled by user.")
+        return 0
+
+    last_return_code = 0
+    for i, pair in enumerate(unprocessed, 1):
+        _section(f"Processing {i}/{len(unprocessed)}")
+        label = pair_label(pair, input_root)
+        _info("Pair", label)
+
+        command = build_auto_process_command(pair, config_path, base_dir)
+        display = format_command(command)
+        print(f"  {_dim(display)}")
+        print()
+
+        env = os.environ.copy()
+        python_path = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = str(base_dir) + (os.pathsep + python_path if python_path else "")
+        completed = subprocess.run(command, cwd=base_dir, env=env)
+        last_return_code = int(completed.returncode)
+
+        if last_return_code == 0:
+            _ok(f"Completed: {pair.question_pdf.name}")
+        else:
+            _warn(f"Failed: {pair.question_pdf.name} (exit code {last_return_code})")
+
+    return last_return_code
 
 
 if __name__ == "__main__":
