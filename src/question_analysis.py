@@ -1625,8 +1625,14 @@ def bind_diagrams_to_questions(
                 if boxes_related(question["box_1000"], diagram.get("box_1000"))
             ]
 
-        images = []
+        # Also extract diagram IDs from [DIAGRAM:...] placeholders in the text
         text = str(question.get("text", ""))
+        text_diagram_refs = re.findall(r'\[DIAGRAM:([^\]]+)\]', text)
+        for diagram_id in text_diagram_refs:
+            if diagram_id in diagram_lookup and diagram_id not in ids:
+                ids.append(diagram_id)
+
+        images = []
         for diagram_id in ids:
             diagram = diagram_lookup[diagram_id]
             image_path = str(diagram.get("absolute_file") or diagram.get("file") or "")

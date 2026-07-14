@@ -90,6 +90,8 @@ def is_dotted_writing_space(image: Any, threshold: int = 240) -> bool:
 
     total_components = 0
     dot_components = 0
+    medium_components = 0
+    large_components = 0
 
     for i in range(1, num_labels):
         area = stats[i, cv2.CC_STAT_AREA]
@@ -105,14 +107,25 @@ def is_dotted_writing_space(image: Any, threshold: int = 240) -> bool:
         # Check if the component is dot-like (small bounding box and area)
         if w <= 15 and h <= 15 and area <= 60:
             dot_components += 1
+        # Track medium-sized features (text labels, diagram elements)
+        elif w <= 50 and h <= 50 and area <= 500:
+            medium_components += 1
+        # Track large features (diagram structures)
+        else:
+            large_components += 1
 
     if total_components == 0:
         return False
 
     dot_ratio = dot_components / total_components
 
-    # Dotted lines are composed of a large number of repeating tiny dots with no large features.
-    if total_components >= 15 and dot_ratio >= 0.85:
+    # Reject if we have substantial non-dot features (diagrams have labels, structures)
+    if medium_components >= 5 or large_components >= 3:
+        return False
+
+    # Stricter thresholds: require MORE dots (30+) and HIGHER ratio (95%)
+    # Real dotted lines have hundreds of uniform dots with no large features
+    if total_components >= 30 and dot_ratio >= 0.95:
         return True
 
     return False
