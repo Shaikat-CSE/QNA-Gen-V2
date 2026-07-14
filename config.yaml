@@ -32,8 +32,8 @@ quality:
   min_width: 64
   min_height: 100
   min_area: 4096
-  max_blank_ratio: 0.97
-  max_aspect_ratio: 4.0
+  max_blank_ratio: 0.975  # Raised from 0.97 to capture multi-panel graphs with spacing
+  max_aspect_ratio: 4.5   # Raised from 4.0 to capture wide option rows
   min_confidence: 0.7
   max_width_ratio: 0.85
   max_height_ratio: 0.85
