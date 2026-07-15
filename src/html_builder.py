@@ -306,6 +306,7 @@ def group_qnas_by_parent(flat_qnas: list[dict[str, Any]]) -> list[dict[str, Any]
                 except (TypeError, ValueError):
                     pass
 
+            # Collect images from all subparts including parent intro
             for image_path in normalize_image_list(subpart.get("associated_images")):
                 if image_path not in seen_images:
                     seen_images.add(image_path)

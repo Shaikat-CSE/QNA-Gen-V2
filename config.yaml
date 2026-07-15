@@ -33,7 +33,7 @@ quality:
   min_height: 100
   min_area: 4096
   max_blank_ratio: 0.975  # Raised from 0.97 to capture multi-panel graphs with spacing
-  max_aspect_ratio: 4.5   # Raised from 4.0 to capture wide option rows
+  max_aspect_ratio: 5.0   # Raised from 4.5 to capture wide cell diagrams arranged horizontally
   min_confidence: 0.7
   max_width_ratio: 0.85
   max_height_ratio: 0.85
@@ -55,12 +55,12 @@ analysis:
   dpi: 200
   image_size: 1000
   page_plan_enabled: true
-  batch_size: 20
+  batch_size: 75
   workers: 6
   # Optional override. Defaults to 'workers' count if page_plan_enabled is true, otherwise 1.
   qp_workers:
-  ms_workers: 6
-  cleanup_workers: 8
+  ms_workers: 12
+  cleanup_workers: 16
   keep_pages: false
   cleanup_with_llm: true
   page_start:
