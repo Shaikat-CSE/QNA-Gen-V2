@@ -30,7 +30,7 @@ crop:
 quality:
   enabled: true
   min_width: 64
-  min_height: 80          # Lowered from 100 to capture smaller diagrams like animal cells
+min_height: 80          # Lowered from 100 to capture smaller diagrams like animal cells
   min_area: 3500          # Lowered from 4096 to be less strict on small diagrams
   max_blank_ratio: 0.985  # Raised from 0.98 to capture blank pie charts and similar diagrams
   max_aspect_ratio: 4.5   # Raised from 4.0 to capture wide option rows
@@ -55,7 +55,7 @@ analysis:
   dpi: 200
   image_size: 1000
   page_plan_enabled: true
-  batch_size: 20
+  batch_size: 75
   workers: 6
   # Optional override. Defaults to 'workers' count if page_plan_enabled is true, otherwise 1.
   qp_workers:
