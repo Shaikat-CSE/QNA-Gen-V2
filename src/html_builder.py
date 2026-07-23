@@ -22,6 +22,7 @@ def build_from_qna_json(
     paper_key: str | None = None,
     group_by_parent: bool = True,
     copy_images: bool = True,
+    llm_client: Any = None,
 ) -> dict[str, Any]:
     payload = load_json(qna_json_path)
     raw_qnas = extract_qna_list(payload)
@@ -36,6 +37,7 @@ def build_from_qna_json(
         paper_key=paper_key or inferred_paper,
         group_by_parent=group_by_parent,
         copy_images=copy_images,
+        llm_client=llm_client,
     )
 
 
@@ -46,6 +48,7 @@ def build_from_metadata(
     year: str | None = None,
     paper_key: str | None = None,
     copy_images: bool = True,
+    llm_client: Any = None,
 ) -> dict[str, Any]:
     payload = load_json(metadata_path)
     inferred_subject, inferred_year, inferred_paper = infer_names_from_metadata(payload, metadata_path)
@@ -60,6 +63,7 @@ def build_from_metadata(
         paper_key=paper_key or inferred_paper,
         group_by_parent=False,
         copy_images=copy_images,
+        llm_client=llm_client,
     )
 
 
@@ -72,6 +76,7 @@ def build_workbook(
     paper_key: str,
     group_by_parent: bool = True,
     copy_images: bool = True,
+    llm_client: Any = None,
 ) -> dict[str, Any]:
     output_dir = ensure_dir(output_dir)
     prepared_qnas = prepare_qnas(
@@ -80,6 +85,7 @@ def build_workbook(
         source_dir=source_dir,
         group_by_parent=group_by_parent,
         copy_images=copy_images,
+        llm_client=llm_client,
     )
 
     generator = HTMLGenerator(str(output_dir), subject_name=subject_name, year=year, paper_key=paper_key)
@@ -108,20 +114,84 @@ def remove_stale_question_pages(output_dir: Path) -> None:
             path.unlink()
 
 
+def renumber_questions_to_simple_format(qnas: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """
+    Renumber questions from lettered format (A1, A1(a), A2, B1, B2...) to simple format (1, 2, 3, 4...).
+    Preserves sub-question structure (1(a), 1(b), 2(a), etc.).
+    """
+    # Extract unique parent question numbers in order
+    parent_numbers = []
+    seen_parents = set()
+
+    for qna in qnas:
+        q_num = str(qna.get("question_number", ""))
+        # Match patterns like A1, B2, A1(a), B2(b)(i), etc.
+        # Extract the main number part (e.g., A1 -> A1, A1(a) -> A1, B2(c)(ii) -> B2)
+        match = re.match(r'^([A-Z]\d+)', q_num)
+        if match:
+            parent = match.group(1)
+            if parent not in seen_parents:
+                parent_numbers.append(parent)
+                seen_parents.add(parent)
+        else:
+            # Already simple format (1, 2, 3...) or other format - check if numeric only
+            match = re.match(r'^(\d+)', q_num)
+            if match:
+                parent = match.group(1)
+                if parent not in seen_parents:
+                    parent_numbers.append(parent)
+                    seen_parents.add(parent)
+
+    # Create mapping from old parent numbers to new simple numbers
+    parent_mapping = {}
+    for idx, old_parent in enumerate(parent_numbers, start=1):
+        parent_mapping[old_parent] = str(idx)
+
+    # Renumber all questions
+    renumbered_qnas = []
+    for qna in qnas:
+        new_qna = qna.copy()
+        q_num = str(qna.get("question_number", ""))
+
+        # Try lettered format first (A1, B2, etc.)
+        match = re.match(r'^([A-Z]\d+)(.*)', q_num)
+        if match:
+            old_parent = match.group(1)
+            suffix = match.group(2)  # e.g., "(a)", "(b)(i)", etc.
+            if old_parent in parent_mapping:
+                new_qna["question_number"] = parent_mapping[old_parent] + suffix
+        else:
+            # Check if already simple numeric format
+            match = re.match(r'^(\d+)(.*)', q_num)
+            if match:
+                # Already in simple format, keep as is
+                pass
+
+        renumbered_qnas.append(new_qna)
+
+    return renumbered_qnas
+
+
 def prepare_qnas(
     raw_qnas: list[dict[str, Any]],
     output_dir: Path,
     source_dir: Path | None,
     group_by_parent: bool,
     copy_images: bool,
+    llm_client: Any = None,
 ) -> list[dict[str, Any]]:
     if group_by_parent and looks_like_flat_qnas(raw_qnas):
-        render_qnas = group_qnas_by_parent([normalize_flat_qna(item, index) for index, item in enumerate(raw_qnas)])
+        # Normalize first
+        normalized = [normalize_flat_qna(item, index) for index, item in enumerate(raw_qnas)]
+        # Renumber from lettered format (A1, A2, B1...) to simple format (1, 2, 3...)
+        renumbered = renumber_questions_to_simple_format(normalized)
+        # Then group by parent
+        render_qnas = group_qnas_by_parent(renumbered)
     else:
         render_qnas = [normalize_render_qna(item, index) for index, item in enumerate(raw_qnas)]
 
     for qna in render_qnas:
-        stage_associated_images(qna, output_dir=output_dir, source_dir=source_dir, copy_images=copy_images)
+        stage_associated_images(qna, output_dir=output_dir, source_dir=source_dir, copy_images=copy_images, llm_client=llm_client)
 
     return render_qnas
 
@@ -389,6 +459,7 @@ def stage_associated_images(
     output_dir: Path,
     source_dir: Path | None,
     copy_images: bool,
+    llm_client: Any = None,
 ) -> None:
     images = normalize_image_list(qna.get("associated_images"))
     if not images:
@@ -396,7 +467,7 @@ def stage_associated_images(
 
     text_html = str(qna.get("text_html") or "")
     staged_sources: list[str] = []
-    unreferenced_figures: list[str] = []
+    unreferenced_images_data: list[tuple[str, Path]] = []
 
     import base64
     import mimetypes
@@ -419,12 +490,15 @@ def stage_associated_images(
 
         text_html = replace_image_references(text_html, image_value, source_image, base64_src)
         if not html_references_image(text_html, base64_src, image_value):
-            unreferenced_figures.append(figure_html(base64_src, Path(image_value).name))
+            unreferenced_images_data.append((base64_src, source_image))
 
         staged_sources.append(base64_src)
 
-    if unreferenced_figures:
-        text_html = "\n".join(unreferenced_figures) + "\n" + text_html
+    # Append unreferenced images at the bottom (no LLM API call)
+    if unreferenced_images_data:
+        # No LLM client: append unreferenced images at the end
+        for base64_src, source_image in unreferenced_images_data:
+            text_html = text_html + "\n" + figure_html(base64_src, source_image.name, unreferenced=True)
 
     text_html = remove_figure_captions(text_html)
     qna["text_html"] = text_html
@@ -669,8 +743,14 @@ def html_references_image(text_html: str, relative_src: str, original_value: str
     return relative_src in text_html or (bool(image_name) and image_name in text_html and "<img" in text_html)
 
 
-def figure_html(relative_src: str, caption: str) -> str:
+def figure_html(relative_src: str, caption: str, unreferenced: bool = False) -> str:
     safe_src = html.escape(relative_src, quote=True)
+    if unreferenced:
+        return f"""
+    <div class="figure-wrapper unreferenced-diagram">
+      <div class="diagram-label">Associated Diagram: {html.escape(caption)}</div>
+      <img src="{safe_src}" alt="Diagram">
+    </div>"""
     return f"""
     <div class="figure-wrapper">
       <img src="{safe_src}" alt="Diagram">

@@ -7,3 +7,13 @@ output/
 models/
 .cache/
 .env
+
+# Claude AI / IDE
+.claude/
+.claude-summary.md
+.tasks/
+CLAUDE.md
+
+# Diagnostic / utility scripts (non-core)
+src/check_missing_diagrams.py
+src/diagnose_page.py

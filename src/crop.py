@@ -74,6 +74,33 @@ def save_crop(crop: CropResult, output_path: Path) -> None:
         raise RuntimeError(f"Could not save crop: {output_path}")
 
 
+def has_structural_content(image: Any, threshold: int = 240) -> bool:
+    """Check if image has meaningful structural content (lines, shapes, text)."""
+    if image is None or image.size == 0:
+        return False
+
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+    # Edge detection to find lines and shapes
+    edges = cv2.Canny(gray, 30, 100)
+    edge_density = np.sum(edges > 0) / edges.size
+
+    # If we have substantial edge content, it's likely a real diagram
+    if edge_density > 0.01:  # More than 1% edges indicates structure
+        return True
+
+    # Check for text-like regions using morphological operations
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    dilated = cv2.dilate(edges, kernel, iterations=1)
+    contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    # Real diagrams have multiple distinct contours
+    if len(contours) >= 3:
+        return True
+
+    return False
+
+
 def is_dotted_writing_space(image: Any, threshold: int = 240) -> bool:
     if image is None or image.size == 0:
         return False
@@ -85,11 +112,18 @@ def is_dotted_writing_space(image: Any, threshold: int = 240) -> bool:
     if width < 50 or height < 15:
         return False
 
+    # Check if this has structural content first
+    # If it does, it's NOT a dotted line regardless of dots
+    if has_structural_content(image, threshold):
+        return False
+
     # Perform connected components analysis to find dot patterns
     num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(binary, connectivity=8)
 
     total_components = 0
     dot_components = 0
+    medium_components = 0
+    large_components = 0
 
     for i in range(1, num_labels):
         area = stats[i, cv2.CC_STAT_AREA]
@@ -105,14 +139,25 @@ def is_dotted_writing_space(image: Any, threshold: int = 240) -> bool:
         # Check if the component is dot-like (small bounding box and area)
         if w <= 15 and h <= 15 and area <= 60:
             dot_components += 1
+        # Track medium-sized features (text labels, diagram elements)
+        elif w <= 50 and h <= 50 and area <= 500:
+            medium_components += 1
+        # Track large features (diagram structures)
+        else:
+            large_components += 1
 
     if total_components == 0:
         return False
 
     dot_ratio = dot_components / total_components
 
-    # Dotted lines are composed of a large number of repeating tiny dots with no large features.
-    if total_components >= 15 and dot_ratio >= 0.85:
+    # Reject if we have substantial non-dot features (diagrams have labels, structures)
+    if medium_components >= 5 or large_components >= 3:
+        return False
+
+    # Stricter thresholds: require MORE dots (30+) and HIGHER ratio (95%)
+    # Real dotted lines have hundreds of uniform dots with no large features
+    if total_components >= 30 and dot_ratio >= 0.95:
         return True
 
     return False

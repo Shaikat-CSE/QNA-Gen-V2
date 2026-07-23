@@ -592,6 +592,7 @@ def maybe_build_html(config: dict[str, Any], base_dir: Path, output_root: Path, 
         return
 
     from .html_builder import build_from_metadata, build_from_qna_json
+    from .question_analysis import make_llm_client
 
     # Determine paper name from processed PDFs
     if pdfs:
@@ -612,12 +613,22 @@ def maybe_build_html(config: dict[str, Any], base_dir: Path, output_root: Path, 
 
     qna_json = html_config.get("qna_json")
 
+    # Create LLM client for intelligent image placement if analysis.llm is configured
+    llm_client = None
+    analysis_config = config.get("analysis") or {}
+    if analysis_config.get("llm", {}).get("enabled", False):
+        try:
+            llm_client = make_llm_client(analysis_config, base_dir)
+        except Exception:
+            LOGGER.warning("Could not create LLM client for HTML image placement, falling back to default positioning")
+
     common_options = {
         "output_dir": html_output_dir,
         "subject_name": optional_str(html_config.get("subject")),
         "year": optional_str(html_config.get("year")),
         "paper_key": optional_str(html_config.get("paper_key")),
         "copy_images": bool(html_config.get("copy_images", True)),
+        "llm_client": llm_client,
     }
 
     if qna_json:

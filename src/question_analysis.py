@@ -253,7 +253,8 @@ def analyze_question_pdf(
                             len(normalized),
                         )
                     except Exception as exc:
-                        LOGGER.exception("Failed QP batch %s", [p.page_number for p in batch])
+                        LOGGER.error("Failed QP batch %s: %s", [p.page_number for p in batch], exc)
+                        raise
                     finally:
                         if not keep_pages:
                             for rp in batch:
@@ -281,7 +282,8 @@ def analyze_question_pdf(
                                 len(normalized),
                             )
                         except Exception as exc:
-                            LOGGER.exception("Failed QP batch %s", [p.page_number for p in batch])
+                            LOGGER.error("Failed QP batch %s: %s", [p.page_number for p in batch], exc)
+                            raise
                         finally:
                             if not keep_pages:
                                 for rp in batch:
@@ -382,17 +384,42 @@ def plan_question_pages(
     llm_client: "OpenAICompatibleVisionClient",
     workers: int = 1,
 ) -> dict[int, dict[str, Any]]:
-    # Try batched sequence planning first
-    try:
-        LOGGER.info("Attempting batched sequence planning for %s pages...", len(rendered_pages))
-        image_paths = [rp.image_path for rp in rendered_pages]
-        page_numbers = [rp.page_number for rp in rendered_pages]
-        raw_plans = llm_client.analyze_question_pages_plan(image_paths, page_numbers)
-    except Exception as exc:
-        LOGGER.warning("Batched sequence planning failed: %s. Falling back to page-by-page planning.", exc)
-        raw_plans = {}
+    # Chunk pages into groups of 20 to avoid Cloudflare 524 timeout on large PDFs
+    chunk_size = 20
+    raw_plans: dict[int, dict[str, Any]] = {}
 
-    # If some pages are missing from the batched response, fetch them individually
+    for chunk_start in range(0, len(rendered_pages), chunk_size):
+        chunk = rendered_pages[chunk_start : chunk_start + chunk_size]
+        try:
+            LOGGER.info(
+                "Attempting batched sequence planning for pages %s-%s (%s pages)...",
+                chunk[0].page_number, chunk[-1].page_number, len(chunk),
+            )
+            image_paths = [rp.image_path for rp in chunk]
+            page_numbers = [rp.page_number for rp in chunk]
+            chunk_plans = llm_client.analyze_question_pages_plan(image_paths, page_numbers)
+            raw_plans.update(chunk_plans)
+        except Exception as exc:
+            LOGGER.warning(
+                "Batched sequence planning failed for pages %s-%s: %s. Falling back to page-by-page.",
+                chunk[0].page_number, chunk[-1].page_number, exc,
+            )
+            # Fall back to individual pages for this chunk
+            for rendered_page in chunk:
+                try:
+                    plan = llm_client.analyze_question_page_plan(
+                        rendered_page.image_path,
+                        rendered_page.page_number,
+                        "previous_active",
+                    )
+                    raw_plans[rendered_page.page_number] = plan
+                except Exception as page_exc:
+                    LOGGER.warning(
+                        "QP page planning failed for page %s: %s",
+                        rendered_page.page_number, page_exc,
+                    )
+
+    # If some pages are still missing from the batched response, fetch them individually
     missing_pages = [rp for rp in rendered_pages if rp.page_number not in raw_plans]
     if missing_pages:
         LOGGER.info("Fetching plans for %s missing pages individually...", len(missing_pages))
@@ -658,7 +685,8 @@ def analyze_mark_scheme_pdf(
                             len(normalized),
                         )
                     except Exception as exc:
-                        LOGGER.exception("Failed MS batch %s", [p.page_number for p in batch])
+                        LOGGER.error("Failed MS batch %s: %s", [p.page_number for p in batch], exc)
+                        raise
                     finally:
                         if not keep_pages:
                             for rp in batch:
@@ -682,7 +710,8 @@ def analyze_mark_scheme_pdf(
                                 len(normalized),
                             )
                         except Exception as exc:
-                            LOGGER.exception("Failed MS batch %s", [p.page_number for p in batch])
+                            LOGGER.error("Failed MS batch %s: %s", [p.page_number for p in batch], exc)
+                            raise
                         finally:
                             if not keep_pages:
                                 for rp in batch:
@@ -897,11 +926,21 @@ Return only valid JSON. Do not include markdown fences.
 
 Task:
 1. Extract answer/marking guidance blocks for each question number visible on this page.
-2. Preserve question numbering exactly, e.g. "1(a)", "1(b)(ii)".
-3. Clean answer content for HTML: remove generic boilerplate, wrong-option explanations unless needed for the correct answer, repeated headers, footers, page numbers, and empty table artifacts.
-4. Keep actual marking points, accepted alternatives, equations, mark counts, and important additional guidance.
-5. Use concise HTML in answer_html: paragraphs, ul/li, table/tr/th/td, br, strong are allowed.
-6. Each answer should include box_1000 as [ymin, xmin, ymax, xmax] when possible.
+2. CRITICAL: Locate the question number label precisely. Look for patterns like "1(a)", "2(c)", "3(d)" etc. These are usually:
+   - At the start of each answer section
+   - In bold or distinct formatting
+   - May appear in margins, headers, or inline with the answer text
+3. DO NOT assume sequential numbering - verify each question number by reading the actual label on the page.
+4. If a question number is unclear, include "UNCERTAIN:" prefix in the question_number field.
+5. Preserve question numbering exactly as it appears, e.g. "1(a)", "1(b)(ii)".
+6. Clean answer content for HTML: remove generic boilerplate, wrong-option explanations unless needed for the correct answer, repeated headers, footers, page numbers, and empty table artifacts.
+7. Keep actual marking points, accepted alternatives, equations, mark counts, and important additional guidance.
+8. Use concise HTML in answer_html: paragraphs, ul/li, table/tr/th/td, br, strong are allowed.
+9. Each answer should include box_1000 as [ymin, xmin, ymax, xmax] when possible.
+
+IMPORTANT: Double-check that the answer content semantically matches the question number. For example:
+- If the question number is "2(c)" and the answer talks about calculating PED or revenue, verify this is actually question 2(c) and not question 3(c).
+- Question numbers in mark schemes should align with question numbers in the question paper.
 
 Required JSON shape:
 {
@@ -1011,11 +1050,22 @@ Return only valid JSON. Do not include markdown fences.
 Task:
 1. Extract answer/marking guidance blocks for each question number visible on these pages.
 2. For each answer, specify the "page" number (an integer from the list {page_numbers}).
-3. Preserve question numbering exactly, e.g. "1(a)", "1(b)(ii)".
-4. Clean answer content for HTML: remove generic boilerplate, wrong-option explanations unless needed for the correct answer, repeated headers, footers, page numbers, and empty table artifacts.
-5. Keep actual marking points, accepted alternatives, equations, mark counts, and important additional guidance.
-6. Use concise HTML in answer_html: paragraphs, ul/li, table/tr/th/td, br, strong are allowed.
-7. Each answer should include box_1000 as [ymin, xmin, ymax, xmax] relative to that page image when possible.
+3. CRITICAL: Locate the question number label precisely. Look for patterns like "1(a)", "2(c)", "3(d)" etc. These are usually:
+   - At the start of each answer section
+   - In bold or distinct formatting
+   - May appear in margins, headers, or inline with the answer text
+4. DO NOT assume sequential numbering - verify each question number by reading the actual label on the page.
+5. If a question number is unclear, include "UNCERTAIN:" prefix in the question_number field.
+6. Preserve question numbering exactly as it appears, e.g. "1(a)", "1(b)(ii)".
+7. Clean answer content for HTML: remove generic boilerplate, wrong-option explanations unless needed for the correct answer, repeated headers, footers, page numbers, and empty table artifacts.
+8. Keep actual marking points, accepted alternatives, equations, mark counts, and important additional guidance.
+9. Use concise HTML in answer_html: paragraphs, ul/li, table/tr/th/td, br, strong are allowed.
+10. Each answer should include box_1000 as [ymin, xmin, ymax, xmax] relative to that page image when possible.
+
+IMPORTANT: Double-check that the answer content semantically matches the question number. For example:
+- If you see "2(c)" and the answer talks about calculating PED or revenue, verify this is the correct question number.
+- Mark scheme question numbers should align with the question paper structure.
+- Pay special attention to transitions between different main questions (e.g., from question 2 to question 3).
 
 Required JSON shape:
 {{
@@ -1123,6 +1173,87 @@ Answer Fragment to Clean:
         )
         return cleaned_q, cleaned_a
 
+    def clean_qna_html_batch(self, qna_pairs: list[dict[str, Any]]) -> list[tuple[str, str]]:
+        """Clean multiple question-answer pairs in a single API call."""
+        if not qna_pairs:
+            return []
+
+        # Build batch prompt with all QNA pairs
+        qna_items = []
+        for idx, qna in enumerate(qna_pairs):
+            q_html = str(qna.get("text", "")).strip()
+            a_html = str(qna.get("answer_text", "")).strip()
+            qna_items.append(f"""
+## Item {idx}
+Question Fragment:
+{q_html}
+
+Answer Fragment:
+{a_html}
+""")
+
+        prompt = f"""You are cleaning exam questions and their corresponding answer/mark scheme HTML fragments.
+
+Return only valid JSON. Do not include markdown fences.
+
+Question Rules:
+- Preserve existing HTML tags, image tags, diagram wrappers, and LaTeX exactly.
+- Remove OCR noise, repeated blank lines, dotted answer lines, underscores, page numbers, and irrelevant headers.
+- Convert markdown-style tables to valid HTML tables.
+
+Answer Rules:
+- Preserve existing section wrappers and useful HTML tags.
+- Keep only actual marking points, accepted answers, equations, and essential guidance.
+- Remove generic boilerplate and wrong-option explanations that do not help answer the question.
+- Convert literal newline markers into <br> only where needed.
+
+Required JSON shape:
+{{
+  "cleaned_items": [
+    {{
+      "cleaned_question": "...",
+      "cleaned_answer": "..."
+    }},
+    ...
+  ]
+}}
+
+Process all {len(qna_pairs)} items below:
+{''.join(qna_items)}
+"""
+
+        cache_key = self._cache_key(prompt, None)
+        cached = self._read_cache(cache_key)
+        if isinstance(cached, dict) and "cleaned_items" in cached:
+            items = cached["cleaned_items"]
+            if isinstance(items, list) and len(items) == len(qna_pairs):
+                return [(str(item.get("cleaned_question", "")), str(item.get("cleaned_answer", ""))) for item in items]
+
+        response_text = self._request_with_retries([{"role": "user", "content": prompt}]).strip()
+        response_text = strip_markdown_fence(response_text)
+
+        try:
+            parsed = parse_json_response(response_text)
+            items = parsed.get("cleaned_items", [])
+        except Exception as exc:
+            LOGGER.warning("Batch cleanup failed, falling back to original content: %s", exc)
+            items = []
+
+        # Ensure we have the right number of results
+        results = []
+        for idx, qna in enumerate(qna_pairs):
+            if idx < len(items) and isinstance(items[idx], dict):
+                cleaned_q = str(items[idx].get("cleaned_question", qna.get("text", "")))
+                cleaned_a = str(items[idx].get("cleaned_answer", qna.get("answer_text", "")))
+            else:
+                # Fallback to original if parsing failed
+                cleaned_q = str(qna.get("text", ""))
+                cleaned_a = str(qna.get("answer_text", ""))
+            results.append((cleaned_q, cleaned_a))
+
+        self._write_cache(cache_key, {"cleaned_items": [{"cleaned_question": q, "cleaned_answer": a} for q, a in results]}, "clean_qna_batch")
+        return results
+
     def analyze_question_pages_plan(
         self,
         image_paths: list[Path],
@@ -1189,6 +1320,19 @@ Required JSON shape:
         content_list: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
         for path in image_paths:
             encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+            # Downscale large images to avoid exceeding LLM context limits
+            if len(encoded) > 500_000:
+                from PIL import Image  # lazy import
+                img = Image.open(path)
+                w, h = img.size
+                scale = (500_000 / len(encoded)) ** 0.5
+                new_w = max(100, int(w * scale))
+                new_h = max(100, int(h * scale))
+                img = img.resize((new_w, new_h), Image.LANCZOS)
+                import io
+                buf = io.BytesIO()
+                img.save(buf, format="PNG")
+                encoded = base64.b64encode(buf.getvalue()).decode("ascii")
             content_list.append(
                 {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{encoded}"}}
             )
@@ -1201,6 +1345,8 @@ Required JSON shape:
                 }
             ]
         )
+        if not response_text.strip():
+            raise RuntimeError("LLM returned empty response — possibly image payload too large or model does not support vision")
         parsed = parse_json_response(response_text)
         self._write_cache(cache_key, parsed, cache_prefix)
         return parsed
@@ -1212,6 +1358,19 @@ Required JSON shape:
             return cached
 
         encoded = base64.b64encode(image_path.read_bytes()).decode("ascii")
+        # Downscale large images to avoid exceeding LLM context limits
+        if len(encoded) > 500_000:
+            from PIL import Image  # lazy import
+            img = Image.open(image_path)
+            w, h = img.size
+            scale = (500_000 / len(encoded)) ** 0.5
+            new_w = max(100, int(w * scale))
+            new_h = max(100, int(h * scale))
+            img = img.resize((new_w, new_h), Image.LANCZOS)
+            import io
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            encoded = base64.b64encode(buf.getvalue()).decode("ascii")
         response_text = self._request_with_retries(
             [
                 {
@@ -1223,6 +1382,8 @@ Required JSON shape:
                 }
             ]
         )
+        if not response_text.strip():
+            raise RuntimeError("LLM returned empty response — possibly image too large or model does not support vision")
         parsed = parse_json_response(response_text)
         self._write_cache(cache_key, parsed, cache_prefix)
         return parsed
@@ -1253,7 +1414,21 @@ Required JSON shape:
                 last_error = exc
                 if attempt >= self.max_retries:
                     break
-                time.sleep(1.5 * (attempt + 1))
+                exc_str = str(exc)
+                # 4xx errors are client errors — retrying won't help
+                if re.search(r"Error code: 4\d{2}", exc_str):
+                    raise RuntimeError(f"LLM request failed (client error): {last_error}") from last_error
+                # Detect Cloudflare 520 / origin errors — back off 60+ seconds
+                if "Error code: 520" in exc_str or "error_code" in exc_str and "520" in exc_str:
+                    LOGGER.warning(
+                        "Cloudflare 520 error on attempt %d/%d. Backing off 65s...",
+                        attempt + 1, self.max_retries + 1,
+                    )
+                    time.sleep(65)
+                elif "429" in exc_str or "rate_limit" in exc_str.lower():
+                    time.sleep(5 * (attempt + 1))
+                else:
+                    time.sleep(1.5 * (attempt + 1))
         raise RuntimeError(f"LLM request failed: {last_error}") from last_error
 
     def _cache_key(self, prompt: str, image_path: Path | None) -> str:
@@ -1343,31 +1518,28 @@ def cleanup_qnas_with_llm(
     llm_client: OpenAICompatibleVisionClient,
     workers: int = 1,
 ) -> list[dict[str, Any]]:
-    workers = min(normalize_worker_count(workers), max(len(qnas), 1))
-    if workers > 1:
-        LOGGER.info("Cleaning QNA HTML with %s LLM worker(s)", workers)
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            return list(executor.map(lambda qna: cleanup_single_qna_with_llm(qna, llm_client), qnas))
+    """Clean all QNAs in a single batch API call."""
+    if not qnas:
+        return []
 
-    return [cleanup_single_qna_with_llm(qna, llm_client) for qna in qnas]
+    LOGGER.info("Cleaning %d QNAs with batch LLM call", len(qnas))
 
-
-def cleanup_single_qna_with_llm(qna: dict[str, Any], llm_client: OpenAICompatibleVisionClient) -> dict[str, Any]:
-    item = dict(qna)
     try:
-        text = str(item.get("text", "")).strip()
-        answer_text = str(item.get("answer_text", "")).strip()
+        # Make a single batch API call for all QNAs
+        cleaned_pairs = llm_client.clean_qna_html_batch(qnas)
 
-        if text or answer_text:
-            cleaned_q, cleaned_a = llm_client.clean_qna_html(text, answer_text)
+        # Update the QNAs with cleaned content
+        result = []
+        for qna, (cleaned_q, cleaned_a) in zip(qnas, cleaned_pairs):
+            item = dict(qna)
             item["text"] = cleaned_q
             item["answer_text"] = cleaned_a
-        else:
-            item["text"] = ""
-            item["answer_text"] = ""
+            result.append(item)
+
+        return result
     except Exception as exc:
-        LOGGER.warning("LLM cleanup failed for question %s: %s", item.get("question_number"), exc)
-    return item
+        LOGGER.warning("Batch cleanup failed, returning original QNAs: %s", exc)
+        return qnas
 
 
 def make_llm_client(config: dict[str, Any], base_dir: Path) -> OpenAICompatibleVisionClient | None:
@@ -1611,6 +1783,14 @@ def bind_diagrams_to_questions(
         for diagrams in diagrams_by_page.values()
         for diagram in diagrams
     }
+
+    # First pass: collect diagrams that are explicitly embedded in question text
+    diagrams_used_inline = set()
+    for question in questions:
+        text = str(question.get("text", ""))
+        text_diagram_refs = re.findall(r'\[DIAGRAM:([^\]]+)\]', text)
+        diagrams_used_inline.update(text_diagram_refs)
+
     output: list[dict[str, Any]] = []
 
     for question in questions:
@@ -1618,15 +1798,25 @@ def bind_diagrams_to_questions(
         page_diagrams = diagrams_by_page.get(page, [])
         ids = [str(value) for value in question.get("associated_diagram_ids") or [] if str(value) in diagram_lookup]
 
+        # Extract diagram IDs from [DIAGRAM:...] placeholders in the text first
+        text = str(question.get("text", ""))
+        text_diagram_refs = re.findall(r'\[DIAGRAM:([^\]]+)\]', text)
+        for diagram_id in text_diagram_refs:
+            if diagram_id in diagram_lookup and diagram_id not in ids:
+                ids.append(diagram_id)
+
+        # Only auto-assign diagrams if:
+        # 1. No diagrams are explicitly assigned yet
+        # 2. The diagram is NOT already used inline in another question
         if not ids and page_diagrams and question.get("box_1000"):
             ids = [
                 diagram["diagram_id"]
                 for diagram in page_diagrams
                 if boxes_related(question["box_1000"], diagram.get("box_1000"))
+                and diagram["diagram_id"] not in diagrams_used_inline
             ]
 
         images = []
-        text = str(question.get("text", ""))
         for diagram_id in ids:
             diagram = diagram_lookup[diagram_id]
             image_path = str(diagram.get("absolute_file") or diagram.get("file") or "")
@@ -1643,6 +1833,36 @@ def bind_diagrams_to_questions(
     return output
 
 
+def validate_question_answer_match(question: dict[str, Any], answer_blocks: list[dict[str, Any]], q_num: str) -> None:
+    """Validate that answer content semantically matches the question."""
+    question_text = str(question.get("text", "")).lower()
+
+    # Extract answer content
+    answer_content = " ".join(
+        str(block.get("answer_html", "")).lower()
+        for block in answer_blocks
+    )
+
+    # Define suspicious patterns
+    suspicious_patterns = [
+        # Question asks to draw/diagram but answer has calculations
+        (["draw", "diagram", "chart", "graph", "sketch"], ["calculate", "calculation", "elasticity", "revenue", "÷", "divide"]),
+        # Question asks to calculate but answer has drawing instructions
+        (["calculate", "work out", "find the value"], ["draw", "label", "equilibrium", "axes"]),
+        # Question about elasticity but answer about something else
+        (["elasticity"], ["training", "canada", "skills"]),
+    ]
+
+    for question_keywords, answer_keywords in suspicious_patterns:
+        if any(kw in question_text for kw in question_keywords):
+            if any(kw in answer_content for kw in answer_keywords):
+                LOGGER.warning(
+                    f"Potential question-answer mismatch for {q_num}: "
+                    f"Question mentions {question_keywords} but answer contains {answer_keywords}. "
+                    f"Question page: {question.get('page')}, Answer page: {answer_blocks[0].get('page') if answer_blocks else 'unknown'}"
+                )
+
+
 def match_questions_to_answers(questions: list[dict[str, Any]], answers: list[dict[str, Any]]) -> list[dict[str, Any]]:
     answer_lookup: dict[str, list[dict[str, Any]]] = {}
     for answer in answers:
@@ -1652,15 +1872,32 @@ def match_questions_to_answers(questions: list[dict[str, Any]], answers: list[di
 
     qnas: list[dict[str, Any]] = []
     seen: set[str] = set()
+    seen_text: set[str] = set()  # Track normalized question text to catch duplicates with different numbering
+
     for question in questions:
         q_num = str(question.get("question_number") or "")
         q_key = normalize_match_key(q_num)
         unique_key = f"{q_key}:{question.get('page')}:{normalize_whitespace(str(question.get('text')))[:80]}"
+
+        # Additional deduplication: check if we've seen very similar text (catches A(a) vs A1(a) duplicates)
+        q_text_normalized = normalize_whitespace(str(question.get('text', ''))).lower().strip()
+        if len(q_text_normalized) > 30:  # Only check substantial questions
+            text_signature = q_text_normalized[:200]  # Use first 200 chars as signature
+            if text_signature in seen_text:
+                LOGGER.debug(f"Skipping duplicate question with different numbering: {q_num} (text already seen)")
+                continue
+            seen_text.add(text_signature)
+
         if unique_key in seen:
             continue
         seen.add(unique_key)
 
         answer_blocks = find_matching_answers(q_key, answer_lookup)
+
+        # Validate semantic match between question and answer
+        if answer_blocks:
+            validate_question_answer_match(question, answer_blocks, q_num)
+
         answer_html = merge_answer_html(answer_blocks, q_num)
         qnas.append(
             {
@@ -1831,8 +2068,14 @@ def normalize_answer_block(answer: dict[str, Any], page_number: int) -> dict[str
     answer_html = str(answer.get("answer_html") or answer.get("answer_text") or "").strip()
     if answer_html and "<" not in answer_html:
         answer_html = plain_text_to_answer_html(answer_html)
+
+    # Check for UNCERTAIN prefix and log warning
+    question_number = normalize_question_label(str(answer.get("question_number") or ""))
+    if question_number.startswith("UNCERTAIN:"):
+        LOGGER.warning(f"Answer extracted with uncertain question number: {question_number} on page {page_number}")
+
     return {
-        "question_number": normalize_question_label(str(answer.get("question_number") or "")),
+        "question_number": question_number,
         "answer_html": answer_html,
         "marks": normalize_int_or_none(answer.get("marks")),
         "box_1000": normalize_box_1000(answer.get("box_1000")),
